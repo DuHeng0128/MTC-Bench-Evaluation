@@ -1,0 +1,24 @@
+task: "infovqa_val_lite_tcbench"
+test_split: train
+output_type: generate_until
+group: tcbench_lite
+metric_list:
+  - metric: anls
+    aggregation: mean
+    higher_is_better: true
+dataset_path: /root/TCBench/image/Specific_Capabilities/Fine_grained_Vision_Coverage/infovqa_val
+dataset_kwargs:
+  token: True
+  local_files_only: True
+  ignore_verifications: True
+doc_to_target: "answers"
+doc_to_visual: !function utils.infovqa_doc_to_visual
+doc_to_text: !function utils.infovqa_doc_to_text
+generation_kwargs:
+  max_new_tokens: 32
+  temperature: 0
+  do_sample: False
+lmms_eval_specific_kwargs:
+  default:
+    pre_prompt: ""
+    post_prompt: "\nAnswer the question using a single word or phrase."

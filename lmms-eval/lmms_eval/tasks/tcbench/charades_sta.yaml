@@ -1,0 +1,32 @@
+dataset_path: /root/TCBench/video/Specific_Capabilities/Spatial_Structure_Reservation/Charades-STA
+dataset_kwargs:
+  token: True
+  local_files_only: True
+  ignore_verifications: True
+  cache_dir: charades_sta
+metadata:
+  version: 0.0.1
+  load_package: True
+task: "charades_sta_test_tcbench"
+dataset_name: Charades_STA
+test_split: test
+group: tcbench
+output_type: generate_until
+
+doc_to_visual: !function utils.charades_doc_to_visual
+doc_to_text: !function utils.charades_doc_to_text
+doc_to_target: !function utils.charades_doc_to_target
+process_results: !function utils.charades_process_results
+
+metric_list:
+  - metric: R_at_K_IoU
+    aggregation: !function utils.charades_r_at_k_aggregate
+    higher_is_better: true
+
+lmms_eval_specific_kwargs:
+  default:
+    pre_prompt: ""
+    post_prompt: "\nProvide a timestamp interval (e.g. \"12.3-15.7\") or several candidates separated by ';'."
+    r_at_k:
+      ks: [1, 5]
+      iou_thresholds: [0.3, 0.5]

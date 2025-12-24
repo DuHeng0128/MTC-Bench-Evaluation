@@ -1,0 +1,18 @@
+metadata:
+  version: 0.0
+  gpt_eval_model_name: "gpt-3.5-turbo-0613"
+  sys_prompt: "有如下几个选项："
+
+task: mmbench_cn_test_tcbench
+test_split: test
+group: tcbench_image
+metric_list:
+  - metric: gpt_eval_score
+    aggregation: !function utils.mmbench_aggregate_dev_results_eval_cn
+    higher_is_better: true
+  - metric: submission
+    aggregation: !function utils.mmbench_aggregate_test_results_cn
+    higher_is_better: true
+
+include: _default_template_mmbench_cn_yaml
+

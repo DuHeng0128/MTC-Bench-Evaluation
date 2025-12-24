@@ -1,0 +1,30 @@
+dataset_path: /root/TCBench/image/Specific_Capabilities/Reasoning_or_Math/MMMU
+task: "mmmu_test_tcbench"
+test_split: test
+output_type: generate_until
+group: tcbench_image
+doc_to_visual: !function utils.mmmu_doc_to_visual
+doc_to_text: !function utils.mmmu_doc_to_text
+doc_to_target: "answer"
+# The return value of process_results will be used by metrics
+process_results: !function utils.mmmu_process_results
+
+metric_list:
+  - metric: mmmu_acc
+    aggregation: !function utils.mmmu_aggregate_results
+    higher_is_better: true
+  - metric: submission
+    aggregation: !function utils.mmmu_test_aggregate_results_for_submission
+    higher_is_better: true
+
+generation_kwargs:
+  max_new_tokens: 16
+
+metadata:
+  version: 0.0
+  interleaved_format: false
+
+dataset_kwargs:
+  token: True
+  local_files_only: True
+  ignore_verifications: True
