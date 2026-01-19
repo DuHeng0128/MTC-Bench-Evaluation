@@ -1,6 +1,6 @@
 # MTC-Bench Token Compression Evaluation
 
-This repository evaluates **training-free token compression / token pruning** methods (e.g., **FastV**, **VisionZip**, **PruMerge+**) on **MTC-Bench**, built on top of the **TCBench** dataset, using **lmms-eval** as the unified evaluation entry point.
+This repository evaluates **training-free token compression / token pruning** methods (e.g., **FastV**, **VisionZip**, **PruMerge+**) on **MTC-Bench**, using **lmms-eval** as the unified evaluation entry point.
 
 The codebase is adapted from **EffiVLM-Bench** and follows the same high-level integration style (method selection + budget control, with monkeypatch-based injection where applicable).
 
@@ -9,8 +9,8 @@ The codebase is adapted from **EffiVLM-Bench** and follows the same high-level i
 ## What’s included
 
 ### Supported tasks (lmms-eval)
-- `tcbench_image`
-- `tcbench_video`
+- `mtcbench_image`
+- `mtcbench_video`
 
 ### Supported VLMs (example)
 - `qwen2_vl` (recommended default)
@@ -26,35 +26,65 @@ The codebase is adapted from **EffiVLM-Bench** and follows the same high-level i
 
 ## Dataset and task registration
 
-### 1) Download TCBench
+### 1) Download MTC-Bench
 Dataset on HuggingFace:
 
-- `https://huggingface.co/datasets/DuHeng0128/TCBench`
+- `https://huggingface.co/datasets/DuHeng0128/MTC-Bench`
 
 Download the dataset with your preferred method (e.g., `huggingface-cli`, scripts, or manual download).
 
-### 2) Register tasks in lmms-eval
-Move the dataset folder `tcbench` into:
+### 2) Extract and Configure the Dataset
+Navigate to your downloaded MTC-Bench folder and run the following commands:
+
+1. Extract the dataset: 
+   ```bash
+   cd /path/to/your/MTC-Bench
+   cat MTC-Bench.tar.* | tar -xvf -
+   ```
+   This creates the mtcbench data folder.
+
+2. Update YAML configuration paths:
+
+   Run the script `update_yaml_paths.py` (provided in the Hugging Face repo).
+
+   Important: Open `update_yaml_paths.py` and set the `YOUR_LOCAL_DATASET_PATH` variable to the absolute path of the extracted `mtcbench` folder.
+
+   ```python
+   # Example Path
+   YOUR_LOCAL_DATASET_PATH = '/root/data/MTC-Bench'
+   ```
+
+3. Run the script:
+
+   ```bash
+   python update_yaml_paths.py
+   ```
+   This updates all task YAML files to use your local dataset path.
+
+### 3) Register tasks in lmms-eval
+Move the dataset folder `mtcbench` into:
 
 ```bash
-lmms-eval/tasks/tcbench
+lmms-eval/tasks/mtcbench
 ```
 
 After that, lmms-eval can discover:
-- `tcbench_image`
-- `tcbench_video`
+- `mtcbench_image`
+- `mtcbench_video`
 
 ---
 
 ## Installation
-
-Below is a practical installation flow aligned with the upstream EffiVLM-Bench setup pattern (CUDA / PyTorch / flash-attn / lmms-eval / qwen2vl).
+Below is a practical installation flow (CUDA / PyTorch / flash-attn / lmms-eval / qwen2vl).
 
 ### 1) Create an environment and install dependencies
 
 ```bash
 conda create -n mllm-efficiency python=3.10
 conda activate mllm-efficiency
+
+sudo apt-get update
+sudo apt-get install -y openjdk-11-jre-headless
 
 pip install -r requirements.txt
 pip install ninja omegaconf flash-attention-softmax-n
@@ -255,16 +285,14 @@ This repository is adapted from **EffiVLM-Bench** and reuses its general integra
 ---
 
 ## Citation
-
-If you use this benchmark harness in a paper or technical report, please consider citing EffiVLM-Bench:
+If you find this benchmark helpful or use it in your research, please consider citing our survey paper:
 
 ```bibtex
-@misc{wang2025effivlmbenchcomprehensivebenchmarkevaluating,
-  title={EffiVLM-BENCH: A Comprehensive Benchmark for Evaluating Training-Free Acceleration in Large Vision-Language Models},
-  author={Zekun Wang and Minghua Ma and Zexin Wang and Rongchuan Mu and Liping Shan and Ming Liu and Bing Qin},
-  year={2025},
-  eprint={2506.00479},
-  archivePrefix={arXiv},
-  primaryClass={cs.CL}
+@article{yao2026towards,
+  title={Towards Efficient Multimodal Large Language Models: A Survey on Token Compression},
+  author={Yao, Linli and Xing, Long and Shi, Yang and Li, Sida and Liu, Yuanxin and Dong, Yuhao and Zhang, Yi-Fan and Li, Lei and Dong, Qingxiu and Dong, Xiaoyi and others},
+  journal={Authorea Preprints},
+  year={2026},
+  publisher={Authorea}
 }
 ```

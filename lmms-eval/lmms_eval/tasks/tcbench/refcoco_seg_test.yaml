@@ -1,4 +1,0 @@
-group: tcbench_image
-task: refcoco_seg_test_tcbench
-test_split: test
-include: _default_template_seg_yaml
