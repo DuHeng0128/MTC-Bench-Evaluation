@@ -13,7 +13,10 @@ The codebase is adapted from **EffiVLM-Bench** and follows the same high-level i
 - `mtcbench_video`
 
 ### Supported VLMs (example)
-- `qwen2_vl` (recommended default)
+- `Qwen2-VL` (recommended default)
+- `Llava-Onevision`
+- `InternVL2_5`
+
 
 ### Supported token compression methods
 - `fastv`
