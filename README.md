@@ -152,10 +152,10 @@ The batch script approach is recommended for controlled experiments and producin
 lmms-eval \
   --model qwen2_vl \
   --model_args pretrained="Qwen/Qwen2-VL-7B-Instruct" \
-  --tasks tcbench_image \
+  --tasks mtcbench_image \
   --batch_size 1 \
   --device cuda:0 \
-  --output_path ./results/tcbench_qwen2_vl
+  --output_path ./results/mtcbench_qwen2_vl
 ```
 
 ---
@@ -172,10 +172,10 @@ This repository enables compression methods via `--model_args`:
 lmms-eval \
   --model qwen2_vl \
   --model_args 'pretrained="Qwen/Qwen2-VL-7B-Instruct",method=fastv,budgets=0.4,use_flash_attention_2=true' \
-  --tasks tcbench_image \
+  --tasks mtcbench_image \
   --batch_size 1 \
   --device cuda:0 \
-  --output_path ./results/tcbench_qwen2_vl_fastv_b0.4
+  --output_path ./results/mtcbench_qwen2_vl_fastv_b0.4
 ```
 
 ### VisionZip (example)
@@ -183,10 +183,10 @@ lmms-eval \
 lmms-eval \
   --model qwen2_vl \
   --model_args 'pretrained="Qwen/Qwen2-VL-7B-Instruct",method=visionzip,budgets=0.4,use_flash_attention_2=true' \
-  --tasks tcbench_image \
+  --tasks mtcbench_image \
   --batch_size 1 \
   --device cuda:0 \
-  --output_path ./results/tcbench_qwen2_vl_visionzip_b0.4
+  --output_path ./results/mtcbench_qwen2_vl_visionzip_b0.4
 ```
 
 ### PruMerge+ (example)
@@ -196,13 +196,13 @@ Because `+` can be interpreted by shells in some contexts, it is safest to quote
 lmms-eval \
   --model qwen2_vl \
   --model_args 'pretrained="Qwen/Qwen2-VL-7B-Instruct",method="prumerge+",budgets=0.4,use_flash_attention_2=true' \
-  --tasks tcbench_image \
+  --tasks mtcbench_image \
   --batch_size 1 \
   --device cuda:0 \
-  --output_path ./results/tcbench_qwen2_vl_prumergeplus_b0.4
+  --output_path ./results/mtcbench_qwen2_vl_prumergeplus_b0.4
 ```
 
-To evaluate videos, replace `--tasks tcbench_image` with `--tasks tcbench_video`.
+To evaluate videos, replace `--tasks mtcbench_image` with `--tasks mtcbench_video`.
 
 ---
 
@@ -218,7 +218,7 @@ This repository includes a reference batch script, `run_example.sh`, that:
 The script defines:
 - `METHODS=( "prumerge+ prumerge+ use_flash_attention_2=true" "visionzip visionzip use_flash_attention_2=true" "fastv fastv use_flash_attention_2=true" )`
 - `BUDGETS=(0.4)`
-- `TASKS=("tcbench_image")`
+- `TASKS=("mtcbench_image")`
 - `MODEL_PATH` and `MODEL_NAME`
 - `BASE_COMMAND` using `python3 -m accelerate.commands.launch ... -m lmms_eval ...` fileciteturn6file0
 
@@ -230,7 +230,7 @@ Open `run_example.sh` and update these variables to your local setup (examples s
 - `CUDA_VISIBLE_DEVICES="0"`
 - `MODEL_PATH="/path/to/model_or_hf_cache_or_local_dir"`
 - `MODEL_NAME="qwen2_vl"` (or your naming convention)
-- `TASKS=("tcbench_image")` or `("tcbench_video")` fileciteturn6file0
+- `TASKS=("mtcbench_image")` or `("mtcbench_video")` fileciteturn6file0
 
 ### 2) Important security note (API keys)
 The example script contains environment variables like `OPENAI_API_KEY`. **Do not commit real keys** into any public repository.
@@ -257,7 +257,7 @@ and skips execution if the output folder already exists. fileciteturn6file
 All results are written to the directory specified by `--output_path` (single-command), or `ROOT_DIR` (batch script).
 
 Recommended naming scheme:
-- `model_method_task_budget` (e.g., `qwen2_vl_fastv_tcbench_image_0.4_fastv`)
+- `model_method_task_budget` (e.g., `qwen2_vl_fastv_mtcbench_image_0.4_fastv`)
 - keep the git commit hash in your experiment log for reproducibility
 
 ---
@@ -268,7 +268,7 @@ Recommended naming scheme:
 .
 ├── lmms-eval/                  # evaluation entry (tasks live here)
 │   └── tasks/
-│       └── tcbench/            # place the dataset's tcbench folder here
+│       └── mtcbench/            # place the dataset's mtcbench folder here
 ├── qwen2vl/                    # qwen2-vl support (editable install)
 ├── kv_cache_compression/       # optional: if you extend KV cache compression
 ├── token_compression/          # optional: keep method patches in one place
