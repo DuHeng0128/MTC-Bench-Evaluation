@@ -1,8 +1,10 @@
 import abc
+import collections
 import hashlib
 import json
 import os
-from typing import List, Optional, Tuple, Type, TypeVar, Union
+import unicodedata
+from typing import Any, Dict, List, Optional, Tuple, Type, TypeVar, Union
 
 from loguru import logger as eval_logger
 from sqlitedict import SqliteDict
@@ -12,6 +14,9 @@ from lmms_eval import utils
 from lmms_eval.api.instance import Instance
 
 T = TypeVar("T", bound="lmms")
+
+LMMS_EVAL_HOME = os.path.expanduser(os.getenv("LMMS_EVAL_HOME", "~/.cache/lmms-eval"))
+LMMS_EVAL_USE_CACHE = os.getenv("LMMS_EVAL_USE_CACHE", "False")
 
 
 class lmms(abc.ABC):
@@ -25,6 +30,139 @@ class lmms(abc.ABC):
         self._world_size = 1
         self.cache_hook = CacheHook(None)
         self.task_dict = {}
+        self.cache_dict = collections.defaultdict(dict)
+        self.initialized_cache_dir = False
+
+    def prepare_cache_dir(self) -> None:
+        if self.initialized_cache_dir:
+            return
+        resolved_name = self._resolve_model_name_for_cache()
+        cache_hash = self.generate_cache_folder_hash_name(resolved_name)
+        self._cache_dir = os.path.join(LMMS_EVAL_HOME, "eval_cache", cache_hash)
+        eval_logger.info(f"Resolved model folder for cache: {self._cache_dir}")
+        self.initialized_cache_dir = True
+
+    def generate_cache_folder_hash_name(self, model_name: str) -> str:
+        task_dict_keys = list(self.task_dict.keys())
+        class_name = type(self).__name__
+        hash_string = "|".join(task_dict_keys)
+        text_hash = unicodedata.normalize("NFC", hash_string)
+        text_hash = text_hash.replace("\r\n", "\n").replace("\r", "\n")
+        hash_string = hashlib.sha256(text_hash.encode("utf-8")).hexdigest()
+        model_name = os.path.basename(model_name)
+        return f"{class_name}_{model_name}_{hash_string}"
+
+    def _resolve_model_name_for_cache(self) -> str:
+        for attr_name in ("model_name", "model_version", "model_id", "pretrained", "fps", "max_pixels", "min_pixels"):
+            value = getattr(self, attr_name, None)
+            if isinstance(value, str) and value:
+                return value
+        value = getattr(self, "model", None)
+        if isinstance(value, str) and value:
+            return value
+        return type(self).__name__
+
+    @property
+    def get_model_cache_dir(self) -> str:
+        return self._cache_dir
+
+    def get_rank_and_world_size(self) -> Tuple[int, int]:
+        try:
+            import torch.distributed as dist
+
+            if dist.is_initialized():
+                return dist.get_rank(), dist.get_world_size()
+        except Exception:
+            pass
+        return self.rank, self.world_size
+
+    def ensure_model_cache_dir(self) -> str:
+        os.makedirs(self.get_model_cache_dir, exist_ok=True)
+        return self.get_model_cache_dir
+
+    def load_cache(self) -> None:
+        if not hasattr(self, "cache_dict"):
+            self.cache_dict = collections.defaultdict(dict)
+        if not hasattr(self, "initialized_cache_dir"):
+            self.initialized_cache_dir = False
+        if LMMS_EVAL_USE_CACHE == "True":
+            self.prepare_cache_dir()
+            self.cache_dict = self.load_jsonl_cache()
+        else:
+            self.cache_dict = collections.defaultdict(dict)
+
+    def load_jsonl_cache(self) -> Dict[str, Dict[Any, Any]]:
+        cache_dir = self.get_model_cache_dir
+        if not os.path.isdir(cache_dir):
+            return collections.defaultdict(dict)
+
+        rank, world_size = self.get_rank_and_world_size()
+        files = [f"{task_name}_rank{rank}_world_size{world_size}.jsonl" for task_name in self.task_dict.keys()]
+
+        cache_data: Dict[str, Dict[Any, Any]] = collections.defaultdict(dict)
+        for task_name, fname in zip(self.task_dict.keys(), files):
+            full_path = os.path.join(cache_dir, fname)
+            records: Dict[Any, Any] = {}
+            try:
+                with open(full_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        try:
+                            line = json.loads(line)
+                            records[line["doc_id"]] = line["response"]
+                        except (json.JSONDecodeError, KeyError):
+                            eval_logger.warning(f"Skipping malformed JSONL line in {full_path}")
+            except FileNotFoundError:
+                continue
+            cache_data[task_name] = records.copy()
+        return cache_data
+
+    def _extract_doc_id(self, request: Instance) -> Any:
+        if request.doc_id is not None:
+            return request.doc_id
+        try:
+            ctx, doc_to_messages, gen_kwargs, doc_id, task, split = request.args
+            return doc_id
+        except Exception:
+            try:
+                ctx, gen_kwargs, doc_to_visual, doc_id, task, split = request.arguments
+                return doc_id
+            except Exception:
+                return None
+
+    def _append_request_response_to_cache(self, request: Instance, response: Any, task_name: str) -> str:
+        cache_dir = self.ensure_model_cache_dir()
+        rank, world_size = self.get_rank_and_world_size()
+        base = f"{task_name}_rank{rank}_world_size{world_size}.jsonl"
+        file_path = os.path.join(cache_dir, base)
+
+        doc_id = self._extract_doc_id(request)
+        record = {"doc_id": doc_id, "response": response}
+        self.cache_dict[task_name][doc_id] = response
+        line = json.dumps(record, ensure_ascii=False)
+
+        with open(file_path, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+
+        return file_path
+
+    def add_request_response_to_cache(self, request: Instance, response: Any) -> None:
+        if LMMS_EVAL_USE_CACHE == "True":
+            self._append_request_response_to_cache(request, response, request.task_name)
+
+    def get_response_from_cache(self, requests: List[Instance]) -> Tuple[List[Any], List[Instance]]:
+        if LMMS_EVAL_USE_CACHE == "False":
+            return [], requests
+        not_cached_requests = []
+        responses = []
+        for request in requests:
+            if request.doc_id not in self.cache_dict[request.task_name]:
+                not_cached_requests.append(request)
+            else:
+                responses.append(self.cache_dict[request.task_name][request.doc_id])
+        eval_logger.info(f"Loaded {len(responses)} responses from cache")
+        eval_logger.info(f"Not cached {len(not_cached_requests)} requests")
+        return responses, not_cached_requests
 
     @abc.abstractmethod
     def loglikelihood(self, requests: List[Instance]) -> List[Tuple[float, bool]]:

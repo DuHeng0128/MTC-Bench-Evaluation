@@ -368,6 +368,46 @@ def evaluate(
     task_group_alias = collections.defaultdict(dict)
     # store num-fewshot value per task
     num_fewshot = collections.defaultdict(int)
+    use_jsonl_cache = os.getenv("LMMS_EVAL_USE_CACHE", "False") == "True"
+    cache_chunk_size = int(os.getenv("LMMS_EVAL_CACHE_CHUNK_SIZE", "256"))
+
+    if use_jsonl_cache and hasattr(lm, "load_cache"):
+        lm.load_cache()
+
+    def _run_with_jsonl_cache(request_type: str, requests_to_run):
+        if not requests_to_run:
+            return []
+        cache_dict = getattr(lm, "cache_dict", {})
+        cached_count = 0
+        resps = [None] * len(requests_to_run)
+        pending = []
+        pending_positions = []
+        for idx, req in enumerate(requests_to_run):
+            task_cache = cache_dict.get(req.task_name, {})
+            if req.doc_id in task_cache:
+                cached_resp = task_cache[req.doc_id]
+                if isinstance(cached_resp, dict) and "response" in cached_resp:
+                    cached_resp = cached_resp["response"]
+                resps[idx] = cached_resp
+                cached_count += 1
+            else:
+                pending.append(req)
+                pending_positions.append(idx)
+
+        if cached_count:
+            eval_logger.info(f"Loaded {cached_count} {request_type} responses from JSONL cache")
+        if pending:
+            eval_logger.info(f"Running {len(pending)} {request_type} requests not found in JSONL cache")
+            for start in range(0, len(pending), cache_chunk_size):
+                chunk = pending[start : start + cache_chunk_size]
+                chunk_positions = pending_positions[start : start + cache_chunk_size]
+                new_resps = getattr(lm, request_type)(chunk)
+                for pos, req, resp in zip(chunk_positions, chunk, new_resps):
+                    resps[pos] = resp
+                    if hasattr(lm, "add_request_response_to_cache"):
+                        lm.add_request_response_to_cache(req, resp)
+
+        return resps
 
     # get lists of group hierarchy and each type of request
     eval_tasks = get_task_list(task_dict)
@@ -454,7 +494,10 @@ def evaluate(
                 cloned_reqs.extend([req] * req.repeats)
 
         # run requests through model
-        resps = getattr(lm, reqtype)(cloned_reqs)  # Choiszt run generate until
+        if use_jsonl_cache and reqtype in {"generate_until", "generate_until_multi_round"}:
+            resps = _run_with_jsonl_cache(reqtype, cloned_reqs)
+        else:
+            resps = getattr(lm, reqtype)(cloned_reqs)  # Choiszt run generate until
 
         # put responses from model into a list of length K for each request.
         for x, req in zip(resps, cloned_reqs):
