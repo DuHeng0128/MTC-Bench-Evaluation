@@ -1,4 +1,5 @@
 import base64
+import os
 from io import BytesIO
 from typing import List, Optional, Tuple, Union
 
@@ -76,6 +77,9 @@ class Qwen2_VL(lmms):
         self._config = self.model.config
         self.batch_size_per_gpu = int(batch_size)
         self.use_cache = use_cache
+
+        # Read chunk_size from environment variable, default to batch_size
+        self.chunk_size = int(os.environ.get('LMMS_EVAL_CHUNK_SIZE', batch_size))
 
         if accelerator.num_processes > 1:
             assert accelerator.distributed_type in [
@@ -164,7 +168,7 @@ class Qwen2_VL(lmms):
         # so that we don't try to execute e.g. greedy sampling and temp=0.8 sampling
         # in the same batch.
         re_ords = utils.Collator([reg.args for reg in requests], _collate, grouping=True)
-        chunks = re_ords.get_batched(n=self.batch_size, batch_fn=None)
+        chunks = re_ords.get_batched(n=self.chunk_size, batch_fn=None)
         for chunk in chunks:
             contexts, all_gen_kwargs, doc_to_visual, doc_id, task, split = zip(*chunk)
             task = task[0]
@@ -240,7 +244,11 @@ class Qwen2_VL(lmms):
                 # Append the last frame index if not already included
                 if total_frames - 1 not in indices:
                     indices = np.append(indices, total_frames - 1)
+                # Only keep selected frames to reduce memory usage
                 video_inputs[0] = video_inputs[0][indices]
+                # Explicitly delete the full video tensor to free memory
+                import gc
+                gc.collect()
             inputs = self.processor(text=texts, images=image_inputs, videos=video_inputs, padding=True, return_tensors="pt")
 
             if self.device_map == "auto":

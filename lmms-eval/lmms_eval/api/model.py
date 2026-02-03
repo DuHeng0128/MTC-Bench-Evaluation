@@ -1,5 +1,6 @@
 import abc
 import collections
+import gc
 import hashlib
 import json
 import os
@@ -17,6 +18,8 @@ T = TypeVar("T", bound="lmms")
 
 LMMS_EVAL_HOME = os.path.expanduser(os.getenv("LMMS_EVAL_HOME", "~/.cache/lmms-eval"))
 LMMS_EVAL_USE_CACHE = os.getenv("LMMS_EVAL_USE_CACHE", "False")
+# Memory optimization: limit cache dict size in memory
+LMMS_EVAL_CACHE_MEMORY_LIMIT = int(os.getenv("LMMS_EVAL_CACHE_MEMORY_LIMIT", "10000"))  # Max items per task in memory
 
 
 class lmms(abc.ABC):
@@ -143,6 +146,14 @@ class lmms(abc.ABC):
 
         with open(file_path, "a", encoding="utf-8") as f:
             f.write(line + "\n")
+
+        # Memory optimization: limit cache dict size in memory
+        if len(self.cache_dict[task_name]) > LMMS_EVAL_CACHE_MEMORY_LIMIT:
+            # Keep only recent items in memory, older ones are on disk
+            items_to_keep = list(self.cache_dict[task_name].items())[-LMMS_EVAL_CACHE_MEMORY_LIMIT:]
+            self.cache_dict[task_name] = dict(items_to_keep)
+            gc.collect()
+            eval_logger.debug(f"Cache memory optimization: trimmed cache_dict[{task_name}] to {LMMS_EVAL_CACHE_MEMORY_LIMIT} items")
 
         return file_path
 

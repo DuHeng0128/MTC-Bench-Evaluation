@@ -268,13 +268,9 @@ class Task(abc.ABC):
             cache_dir=cache_dir,
             download_mode=download_mode,
         )
-        self.dataset_no_image = datasets.load_dataset(
-            path=self.DATASET_PATH,
-            name=self.DATASET_NAME,
-            data_dir=data_dir,
-            cache_dir=cache_dir,
-            download_mode=download_mode,
-        )
+        # Create dataset_no_image by removing image columns from the loaded dataset
+        # instead of loading the dataset twice
+        self.dataset_no_image = self.dataset.copy()
         for doc_name in self.dataset_no_image:
             remove_cols = []
             features = self.dataset_no_image[doc_name].features
