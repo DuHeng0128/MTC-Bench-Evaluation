@@ -5,11 +5,9 @@ from copy import deepcopy
 from pathlib import Path
 
 import numpy as np
-import openai
 import requests
 import yaml
 from loguru import logger as eval_logger
-from openai import OpenAI
 
 NUM_SECONDS_TO_SLEEP = 0.5
 
@@ -27,7 +25,7 @@ with open(Path(__file__).parent / "ferret.yaml", "r") as f:
 
     config = yaml.safe_load("".join(safe_data))
 
-GPT_EVAL_MODEL_NAME = config["metadata"]["gpt_eval_model_name"]
+GPT_EVAL_MODEL_NAME = os.getenv("MODEL_VERSION", "gpt-4o-2024-11-20")
 
 API_TYPE = os.getenv("API_TYPE", "openai")
 
@@ -88,7 +86,7 @@ def get_eval(content: str, max_tokens: int, retries: int = 3):
 
 def parse_score(review):
     try:
-        score_pair = review.split("\n")[0]
+        score_pair = review.split("\n")[0].strip()
         score_pair = score_pair.replace(",", " ")
         sp = score_pair.split(" ")
         if len(sp) == 2:

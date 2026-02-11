@@ -1,23 +1,13 @@
-import ast
-import datetime
 import json
 import logging
 import os
 import random
-import re
 import sys
 import time
 from pathlib import Path
 
-import numpy as np
-import openai
 import requests
 import yaml
-from decord import VideoReader, cpu
-from openai import OpenAI
-from tqdm import tqdm
-
-import lmms_eval.tasks._task_utils.file_utils as file_utils
 
 with open(Path(__file__).parent / "_default_template_yaml", "r") as f:
     raw_data = f.readlines()
@@ -130,7 +120,7 @@ def vitatecs_process_results(doc, result):
     elif any(pred.startswith(prefix) for prefix in ["A)", "B)"]):
         rating = 1 if pred.split(")")[0] == answer[1] else 0
     elif any(pred.startswith(prefix) for prefix in ["(A)", "(B)"]):
-        rating = 1 if pred.split(")")[1] == answer[1] else 0
+        rating = 1 if pred.split(")")[0][1] == answer[1] else 0
     else:
         # Fail to match answer in the video-llm response. Use ChatGPT to evaluate.
         match_success = False

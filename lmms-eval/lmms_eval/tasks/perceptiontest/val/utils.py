@@ -1,14 +1,8 @@
-import datetime
-import json
 import os
 import sys
 from pathlib import Path
 
-import numpy as np
 import yaml
-from decord import VideoReader, cpu
-
-import lmms_eval.tasks._task_utils.file_utils as file_utils
 
 with open(Path(__file__).parent / "_default_template_yaml", "r") as f:
     raw_data = f.readlines()
@@ -23,12 +17,10 @@ with open(Path(__file__).parent / "_default_template_yaml", "r") as f:
 # We will unzip all the zip files
 # To HF HOME cache dir
 # And load it here
-HF_HOME = os.environ["HF_HOME"]
+HF_HOME = os.getenv("HF_HOME", "~/.cache/huggingface")
 cache_dir = config["dataset_kwargs"]["cache_dir"]
 cache_dir = os.path.join(HF_HOME, cache_dir)
 cache_dir = os.path.join(cache_dir, "videos")
-
-from loguru import logger as eval_logger
 
 
 # Pass in video path here

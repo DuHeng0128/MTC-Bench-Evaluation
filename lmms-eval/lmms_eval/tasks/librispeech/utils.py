@@ -1,6 +1,7 @@
 import os
 import re
 import unicodedata
+from typing import Any
 
 import editdistance as ed  # TODO: new package
 import zhconv  # TODO: new package
@@ -48,16 +49,27 @@ def librispeech_process_result(doc, result):
     return {"wer": data_dict}
 
 
+def librispeech_long_process_result(doc, result):
+    pred = result[0] if len(result) > 0 else ""
+
+    gt = doc["transcript"]
+    task = "asr_en"
+
+    data_dict = {"gt": gt, "pred": pred, "task": task}
+
+    return {"wer": data_dict}
+
+
 PUNCS = "!,.?;:"
 
 
 def remove_sp(text, language):
     gt = re.sub(r"<\|.*?\|>", " ", text)
-    gt = re.sub(rf"\s+", r" ", gt)  # Replace consecutive spaces in the text with a single space.
+    gt = re.sub(r"\s+", r" ", gt)  # Replace consecutive spaces in the text with a single space.
     gt = re.sub(f" ?([{PUNCS}])", r"\1", gt)
     gt = gt.lstrip(" ")
     if language == "zh":
-        gt = re.sub(rf"\s+", r"", gt)
+        gt = re.sub(r"\s+", r"", gt)
     return gt
 
 
@@ -170,6 +182,10 @@ def compute_wer(refs, hyps, language):
     return distance / ref_length
 
 
+def librispeech_doc_to_target(doc: Any):
+    return doc["gt"]
+
+
 def librispeech_wer(results, args):
     # lan = args["language"]
     refs, hyps = [], []
@@ -185,33 +201,3 @@ def librispeech_wer(results, args):
     wer = compute_wer(refs, hyps, lan)
     # print(f"source: {source}  cnt: {len(refs)} wer: {wer:.4f}")
     return wer * 100
-
-    # for gt, response, source, audio_path in zip(merged_gts, merged_responses, merged_sources, merged_audio_paths):
-    #     results.append({
-    #         'gt': gt,
-    #         'response': response,
-    #         'source': source,
-    #         'audio_path': audio_path,
-    #     })
-    # time_prefix = time.strftime('%y%m%d%H%M%S', time.localtime())
-    # results_file = f'{args.dataset}_{time_prefix}.json'
-    # json.dump(results, open(results_file, 'w'))
-    results_dict = {}
-    for item in results:
-        source = item["source"]
-        results_dict.setdefault(source, []).append(item)
-    lan = ds_collections[args.dataset]["language"]
-    for source in results_dict:
-        refs, hyps = [], []
-        results_list = results_dict[source]
-        for result in results_list:
-            gt = result["gt"]
-            response = result["response"]
-            gt = remove_sp(gt, lan)
-            response = remove_sp(response, lan)
-            refs.append(gt)
-            hyps.append(response)
-        wer = compute_wer(refs, hyps, lan)
-        print(f"source: {source}  cnt: {len(refs)} wer: {wer:.4f}")
-
-    pass

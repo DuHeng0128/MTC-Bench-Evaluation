@@ -1,17 +1,11 @@
-import datetime
-import json
 import os
 import re
-import sys
 import time
 from pathlib import Path
 
 import requests
 import yaml
 from loguru import logger as eval_logger
-
-import lmms_eval.tasks._task_utils.file_utils as file_utils
-from lmms_eval.filters.extraction import ExtendedRegexFilter
 
 with open(Path(__file__).parent / "_default_template_yaml", "r") as f:
     raw_data = f.readlines()
@@ -24,7 +18,7 @@ with open(Path(__file__).parent / "_default_template_yaml", "r") as f:
     config = yaml.safe_load("".join(safe_data))
 
 NUM_SECONDS_TO_SLEEP = 5
-GPT_EVAL_MODEL_NAME = config["metadata"]["gpt_eval_model_name"]
+GPT_EVAL_MODEL_NAME = os.getenv("MODEL_VERSION", "gpt-4o-2024-11-20")
 API_TYPE = os.getenv("API_TYPE", "openai")
 
 if API_TYPE == "openai":

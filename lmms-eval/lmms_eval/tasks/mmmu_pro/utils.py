@@ -1,6 +1,4 @@
 import ast
-import json
-import os
 import random
 import re
 from collections import defaultdict
@@ -8,9 +6,6 @@ from pathlib import Path
 
 import numpy as np
 import yaml
-from loguru import logger as eval_logger
-
-from lmms_eval.tasks._task_utils.file_utils import generate_submission_file
 
 with open(Path(__file__).parent / "_default_template_yaml", "r") as f:
     raw_data = f.readlines()
@@ -48,12 +43,35 @@ def construct_prompt(doc, post_prompt="Answer with the option letter from the gi
 
 
 def mmmu_pro_doc_to_text(doc, lmms_eval_specific_kwargs=None):
+    if "format" in lmms_eval_specific_kwargs and lmms_eval_specific_kwargs["format"] == "qwen3_vl":
+        return mmmu_doc_to_text_qwen3vl(doc, lmms_eval_specific_kwargs)
+
     post_prompt = lmms_eval_specific_kwargs["post_prompt"]
     if "question" in doc and "options" in doc:  # original operation
         question = construct_prompt(doc, post_prompt)
         if config["metadata"]["interleaved_format"]:
             question = replace_images_tokens(question)
     return question
+
+
+def mmmu_doc_to_text_qwen3vl(doc, lmms_eval_specific_kwargs=None):
+    """
+    Adapted from Qwen3-VL Technical Report: https://arxiv.org/pdf/2511.21631
+    """
+    pre_prompt = lmms_eval_specific_kwargs.get("pre_prompt", "")
+    post_prompt = lmms_eval_specific_kwargs.get("post_prompt", "")
+    vision_prompt = lmms_eval_specific_kwargs.get("vision_prompt", "")
+
+    options = parse_options(ast.literal_eval(doc["options"]))
+    if "question" in doc:
+        # MMMU pro
+        question = doc["question"]
+        prompt = f"{pre_prompt}{question}\nOptions:\n{options}\n{post_prompt}"
+    else:
+        # MMMU-Pro vision > no question
+        prompt = f"{vision_prompt}\nOptions:\n{options}\n{post_prompt}"
+
+    return prompt
 
 
 def mmmu_pro_doc_to_visual(doc):
@@ -83,7 +101,7 @@ def mmmu_pro_process_results(doc, results):
 
 def mmmu_pro_composite_process_results(doc, results):
     pred = results[0]
-    gt_list = ast.literal_eval(doc["answers"])
+    gt_list = ast.literal_eval(doc["answer"])
     # Parse out option letters from the prediction
     option_letters = re.findall(r"\b[A-Z]\b", pred)
 

@@ -1,78 +1,225 @@
 # New Model Guide
-In order to properly evaluate a given LM, we require implementation of a wrapper class subclassing the `lmms_eval.api.model.lmms` class, that defines how the lmms_eval should interface with your model. This guide walks through how to write this `lmms` subclass via adding it to the library!
+
+To evaluate a model with `lmms_eval`, you implement a wrapper class that subclasses `lmms_eval.api.model.lmms`. This guide walks through the full process.
+
+## Architecture Overview
+
+```
+    ╭──────────────╮                              ╭─────────────╮
+    │  Model Dev   │                              │  Task Dev   │
+    ╰──────┬───────╯                              ╰──────┬──────╯
+           │                                             │
+           ▼                                             ▼
+ ┌─────────────────────┐                    ┌─────────────────────┐
+ │                     │                    │                     │
+ │  Implement lmms     │                    │  Create task YAML   │
+ │  wrapper            │                    │  + utils.py         │
+ │                     │                    │                     │
+ │  Core methods:      │                    │  Preferred:         │
+ │  · generate_until   │                    │  · doc_to_messages  │
+ │  · loglikelihood    │                    │                     │
+ │                     │                    │  Legacy:            │
+ │  Register           │                    │  · doc_to_visual    │
+ │  ModelManifest in   │                    │  · doc_to_text      │
+ │  ModelRegistryV2    │                    │                     │
+ └─────────┬───────────┘                    └──────────┬──────────┘
+           │                                           │
+           │           ╭ ─ ─ ─ ─ ─ ─ ─ ╮              │
+           ╰──────────▶   Evaluator     ◀──────────────╯
+                       │   contract     │
+                        ╰ ─ ─ ─ ┬ ─ ─ ─╯
+                                │
+                                ▼
+                  ┌───────────────────────┐
+                  │                       │
+                  │  Unified Instance     │
+                  │  requests             │
+                  │                       │
+                  │  Model inference      │
+                  │                       │
+                  │  process_results      │
+                  │                       │
+                  │  metrics aggregation  │
+                  │                       │
+                  └───────────────────────┘
+```
+
+**Model Dev** implements the left side; **Task Dev** implements the right side. The evaluator runtime wires them together - your model never needs to know which task is calling it, and vice versa.
+
+## Model Types
+
+| Type | Location | Input method | Recommendation |
+|------|----------|-------------|----------------|
+| **Chat** | `models/chat/` | `doc_to_messages` - structured messages with roles and content types | **Use this** |
+| **Simple** (legacy) | `models/simple/` | `doc_to_visual` + `doc_to_text` - plain text with `<image>` placeholders | Legacy only |
 
 ## Setup
 
-To get started contributing, go ahead and fork the main repo, clone it, create a branch with the name of your task, and install the project requirements in your environment:
-
 ```sh
-# After forking...
 git clone https://github.com/<YOUR-USERNAME>/lmms-eval.git
 cd lmms-eval
 git checkout -b <model-type>
 pip install -e .
+
+# Create your model file
+touch lmms_eval/models/chat/<my_model>.py     # recommended
+touch lmms_eval/models/simple/<my_model>.py   # legacy
 ```
 
-Now, we'll create a new file where we'll be adding our model:
+Reference implementations: `lmms_eval/models/chat/qwen2_5_vl.py` (chat) and `lmms_eval/models/simple/instructblip.py` (simple).
 
-```sh
-touch lmms_eval/models/<my_model_filename>.py
-```
+## Core Methods
 
-**As a rule of thumb, we recommend you to use `lmms_eval/models/qwen_vl.py` and `lmms_eval/models/instructblip.py` as reference implementations for your model. You can copy and paste the contents of one of these files into your new file to get started.**
+All models must subclass `lmms_eval.api.model.lmms` and implement two methods. Each receives a list of `Instance` objects (defined in [`lmms_eval.api.instance`](https://github.com/EvolvingLMMs-Lab/lmms-eval/tree/main/lmms_eval/api/instance.py)) whose `.args` carry the request payload.
 
-## Interface
+### `generate_until`
 
-All models must subclass the `lmms_eval.api.model.lmms` class.
+Open-ended generation. The model produces text given an input prompt + media.
 
-The lmms class enforces a common interface via which we can extract responses from a model:
+**`Instance.args` for chat models** (5 elements):
 
-```python
-class MyCustomLM(lmms):
-    #...
-    def loglikelihood(self, requests: list[Instance]) -> list[tuple[float, bool]]:
-        #...
+| Element | Type | Description |
+|---------|------|-------------|
+| `doc_to_messages` | `Callable` | Function that converts a doc into structured `ChatMessages` |
+| `gen_kwargs` | `dict` | Generation config: `max_new_tokens`, `temperature`, `until`, etc. |
+| `doc_id` | `int` | Index into the dataset split |
+| `task` | `str` | Task name (used to look up the dataset via `self.task_dict`) |
+| `split` | `str` | Dataset split name |
 
-    def generate_until(self, requests: list[Instance]) -> list[str]:
-        #...
-    #...
-```
-Where `Instance` is a dataclass defined in [`lmms_eval.api.instance`](https://github.com/EvolvingLMMs-Lab/lmms-eval/tree/main/lmms_eval/api/instance.py) with property `args` of request-dependent type signature described below.
+**`Instance.args` for simple models** (6 elements):
 
-We support three types of requests, consisting of different interactions / measurements with an autoregressive LM.
+| Element | Type | Description |
+|---------|------|-------------|
+| `contexts` | `str` | Formatted question text (may contain `<image>` tokens) |
+| `gen_kwargs` | `dict` | Generation config |
+| `doc_to_visual` | `Callable` | Function that returns a list of media (PIL images, video paths, etc.) |
+| `doc_id` | `int` | Index into the dataset split |
+| `task` | `str` | Task name |
+| `split` | `str` | Dataset split name |
 
-All three request types take as input `requests` of type `list[Instance]` that have a matching `Instance.request_type` to the method name. Overall, you can check the [construct_requests](https://github.com/EvolvingLMMs-Lab/lmms-eval/blob/main/lmms_eval/api/task.py#L918) to see how the arguments are being constructed for different types of output type requests.
+Returns `list[str]` - one generated string per request.
 
-- `generate_until`
-  - Each request contains `Instance.args : Tuple[str, dict]` containing 1. an input string to the LM and 2. a dictionary of keyword arguments used to control generation parameters.
-  - In each `Instance.args` there will be 6 elements which are `contexts, all_gen_kwargs, doc_to_visual, doc_id, task, split`. `contexts` refers to the formatted question and is the text input for the LMM. Sometimes it might contains image token and need to address differently for different models. `all_gen_kwargs` refers to the dict that contains all the generation configuration for the model. We use `doc_id`, `task`, and `split` to access the dataset and then you can use `doc_to_visual` which is a function reference to process the image. When you implement your own model, you should use these to write your own generate_util function.
-  - Using this input and these generation parameters, text will be sampled from the language model (typically until a maximum output length or specific stopping string sequences--for example, `{"until": ["\n\n", "."], "max_gen_toks": 128}`).
-  - The generated input+output text from the model will then be returned.
+### `loglikelihood`
 
-- `loglikelihood`
-  - Each request contains `Instance.args : Tuple[str, str]` containing 1. an input string to the LM and 2. a target string on which the loglikelihood of the LM producing this target, conditioned on the input, will be returned.
-  - In each `Instance.args` there will be 6 elements which are ` contexts, doc_to_target, doc_to_visual, doc_id, task, split`. `contexts` refers to the formatted question and is the text input for the LMM. Sometimes it might contains image token and need to address differently for different models. `doc_to_target` is a function reference that get the get the answer from the doc. This will be the continuation of the answer and only tokens belong to this part should be calculated for the loglikelihood.
-  - Each request will have, as result, `(ll, is_greedy): Tuple[float, int]` returned, where `ll` is a floating point number representing the log probability of generating the target string conditioned on the input, and `is_greedy` being either the value `0` or `1`, with it being `1` if and only if the target string *would be generated by greedy sampling from the LM* (that is, if the  target string is the *most likely* N-token string to be output by the LM given the input. )
+Scoring for multiple-choice tasks. The model computes the log-probability of a target continuation given a context.
 
+**`Instance.args`** (6 elements):
 
+| Element | Type | Description |
+|---------|------|-------------|
+| `contexts` | `str` | Formatted question text |
+| `doc_to_target` | `Callable` | Function that extracts the answer continuation from the doc |
+| `doc_to_visual` | `Callable` | Function that returns media |
+| `doc_id` | `int` | Index into the dataset split |
+| `task` | `str` | Task name |
+| `split` | `str` | Dataset split name |
 
+Returns `list[tuple[float, bool]]` - `(log_prob, is_greedy)` per request, where `is_greedy` is `True` if the target would be produced by greedy decoding.
 
 ## Registration
 
-Congrats on implementing your model! Now it's time to test it out.
-
-To make your model usable via the command line interface to `lmms_eval`, you'll need to tell `lmms_eval` what your model's name is.
-
-This is done via a *decorator*, `lmms_eval.api.registry.register_model`. Using `register_model()`, one can both tell the package what the model's name(s) to be used are when invoking it with `python -m lmms-eval --model <name>` and alert `lmms_eval` to the model's existence.
+Register your model so `lmms_eval` can find it via `--model <name>`.
 
 ```python
 from lmms_eval.api.registry import register_model
 
-@register_model("<name1>", "<name2>")
-class MyCustomLM(LM):
+@register_model("my_model")
+class MyModel(lmms):
+    is_simple = False  # chat model (recommended)
+    # is_simple = True  # simple model (legacy, default)
 ```
 
-The final step is to import your model in `lmms_eval/models/__init__.py`:
+Then add the entry in `lmms_eval/models/__init__.py`:
+
 ```python
-from .my_model_filename import MyCustomLM
+# Recommended (ModelRegistryV2 manifest)
+from lmms_eval.models.registry_v2 import ModelManifest
+
+MODEL_REGISTRY_V2.register_manifest(
+    ModelManifest(
+        model_id="my_model",
+        chat_class_path="lmms_eval.models.chat.my_model.MyModel",
+    )
+)
+
+# Legacy (still supported)
+AVAILABLE_CHAT_TEMPLATE_MODELS["my_model"] = "MyModel"
 ```
+
+For external plugin packages, prefer Python entry-points (`lmms_eval.models`) over `LMMS_EVAL_PLUGINS`.
+
+## Complete Example (Chat Model)
+
+```python
+from lmms_eval.api.registry import register_model
+from lmms_eval.api.model import lmms
+from lmms_eval.api.instance import Instance
+from lmms_eval.protocol import ChatMessages
+import torch
+
+
+@register_model("my_image_model")
+class MyImageModel(lmms):
+    is_simple = False
+
+    def __init__(self, pretrained: str, device: str = "cuda", **kwargs):
+        super().__init__()
+        self.device = device
+        self.model = load_your_model(pretrained)
+        self.processor = load_your_processor(pretrained)
+
+    def generate_until(self, requests: list[Instance]) -> list[str]:
+        results = []
+        for request in requests:
+            doc_to_messages, gen_kwargs, doc_id, task, split = request.args
+
+            # Build structured messages from the doc
+            doc = self.task_dict[task][split][doc_id]
+            raw_messages = doc_to_messages(doc)
+            messages = ChatMessages(messages=raw_messages)
+
+            # Extract media and format prompt
+            images, videos, audios = messages.extract_media()
+            hf_messages = messages.to_hf_messages()
+            text = self.processor.apply_chat_template(hf_messages)
+
+            # Run inference
+            inputs = self.processor(
+                text=text, images=images, return_tensors="pt"
+            ).to(self.device)
+
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    **inputs,
+                    max_new_tokens=gen_kwargs.get("max_new_tokens", 128),
+                    temperature=gen_kwargs.get("temperature", 0.0),
+                    do_sample=gen_kwargs.get("do_sample", False),
+                )
+
+            response = self.processor.decode(
+                outputs[0], skip_special_tokens=True
+            )
+            results.append(response)
+        return results
+
+    def loglikelihood(
+        self, requests: list[Instance]
+    ) -> list[tuple[float, bool]]:
+        results = []
+        for request in requests:
+            contexts, doc_to_target, doc_to_visual, doc_id, task, split = (
+                request.args
+            )
+            # Compute log-probability of the target continuation
+            # given the context + visual inputs.
+            # ...
+        return results
+```
+
+For video and audio models the pattern is identical - the only difference is which media you extract from `messages.extract_media()`. See `lmms_eval/models/chat/qwen2_5_vl.py` for a production-quality reference.
+
+## Key Notes
+
+- Implement both `generate_until` and `loglikelihood` if your model supports generation and multiple-choice tasks
+- Handle different modalities (image, video, audio) via the `ChatMessages` protocol
+- Follow existing implementations in `lmms_eval/models/chat/` for patterns around batching, device management, and error handling

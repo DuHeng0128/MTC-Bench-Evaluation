@@ -11,7 +11,6 @@ import pathlib
 import re
 import subprocess
 import sys
-import types
 import warnings
 from typing import (
     Any,
@@ -22,7 +21,6 @@ from typing import (
     Literal,
     Optional,
     Tuple,
-    Type,
     Union,
 )
 
@@ -103,6 +101,34 @@ def handle_non_serializable(o):
         return str(o)
 
 
+def is_multimodal_content(value: Any) -> bool:
+    """
+    Check if a value is multimodal content (image, audio, video) that should
+    not be serialized to log files.
+
+    Returns True for:
+    - PIL.Image objects
+    - numpy arrays (typically image/audio data)
+    - bytes (binary data)
+    - torch tensors
+    - dicts with 'array' key (HuggingFace audio format)
+    - dicts with 'bytes' key (HuggingFace image format)
+    """
+    if isinstance(value, (bytes, bytearray, np.ndarray, torch.Tensor)):
+        return True
+    if isinstance(value, dict):
+        if "array" in value or "bytes" in value:
+            return True
+    try:
+        from PIL import Image
+
+        if isinstance(value, Image.Image):
+            return True
+    except ImportError:
+        pass
+    return False
+
+
 def sanitize_list(sub):
     """
     Takes possible nested list and recursively converts all inner component to strings
@@ -115,17 +141,71 @@ def sanitize_list(sub):
         return str(sub)
 
 
+def _smart_comma_split(args_string):
+    """
+    Splits a string by comma, but not if inside quotes or braces.
+
+    This is useful for parsing argument strings that may contain JSON or
+    other structured values with nested commas.
+
+    Args:
+        args_string: The string to split
+
+    Returns:
+        List of split arguments
+    """
+    arg_list = []
+    current_arg = []
+    depth = 0  # Track nesting depth of braces/brackets
+    in_quotes = False
+    quote_char = None
+
+    for i, char in enumerate(args_string):
+        if char in ('"', "'") and (i == 0 or args_string[i - 1] != "\\"):
+            if not in_quotes:
+                in_quotes = True
+                quote_char = char
+            elif char == quote_char:
+                in_quotes = False
+                quote_char = None
+        elif not in_quotes:
+            if char in ("{", "["):
+                depth += 1
+            elif char in ("}", "]"):
+                depth -= 1
+            elif char == "," and depth == 0:
+                # This is a separator comma, not inside JSON
+                arg = "".join(current_arg).strip()
+                if arg:
+                    arg_list.append(arg)
+                current_arg = []
+                continue
+
+        current_arg.append(char)
+
+    # Don't forget the last argument
+    arg = "".join(current_arg).strip()
+    if arg:
+        arg_list.append(arg)
+
+    return arg_list
+
+
 def simple_parse_args_string(args_string):
     """
     Parses something like
         args1=val1,arg2=val2
     Into a dictionary
+    Handles JSON values with nested commas, e.g., arg='{"key1":val1,"key2":val2}'
     """
     args_string = args_string.strip()
     if not args_string:
         return {}
-    arg_list = [arg for arg in args_string.split(",") if arg]
-    args_dict = {k: handle_arg_string(v) for k, v in [arg.split("=") for arg in arg_list]}
+
+    # Smart split: split by comma, but not if inside quotes or braces
+    arg_list = _smart_comma_split(args_string)
+
+    args_dict = {k: handle_arg_string(v) for k, v in [arg.split("=", 1) for arg in arg_list]}
     return args_dict
 
 
@@ -189,7 +269,7 @@ class MultiChoice:
     def __contains__(self, values) -> bool:
         for value in values.split(","):
             if len(fnmatch.filter(self.choices, value)) == 0:
-                eval_logger.info(f"Available tasks to choose:")
+                eval_logger.info("Available tasks to choose:")
                 for choice in self.choices:
                     eval_logger.info(f"  - {choice}")
                 raise ValueError("'{}' is not in task list".format(value))
@@ -446,7 +526,11 @@ class Grouper:
 
 
 def make_table(result_dict, column: str = "results", sort_results: bool = False):
-    """Generate table of results."""
+    """Generate table of results.
+
+    Automatically hides columns that are all N/A (e.g., stability metrics when
+    num_samples=1, or baseline comparison when --baseline is not provided).
+    """
     from pytablewriter import LatexTableWriter, MarkdownTableWriter
 
     if column == "results":
@@ -464,12 +548,32 @@ def make_table(result_dict, column: str = "results", sort_results: bool = False)
         "Value",
         "",
         "Stderr",
+        "Stderr_CLT",
+        "Stderr_Clustered",
+        "EA",
+        "CA",
+        "IV",
+        "CR",
+        "Baseline",
+        "Diff",
+        "CI",
+        "P_Value",
     ]
 
-    md_writer = MarkdownTableWriter()
-    latex_writer = LatexTableWriter()
-    md_writer.headers = all_headers
-    latex_writer.headers = all_headers
+    # Optional columns (index 9+) are hidden if all values are N/A
+    optional_col_indices = list(range(9, len(all_headers)))
+
+    # Helper to format stderr value
+    def fmt_se(se_val):
+        if se_val is None or se_val == "N/A":
+            return "N/A"
+        # Handle empty list/array safely (numpy array comparison is ambiguous)
+        if hasattr(se_val, "__len__") and len(se_val) == 0:
+            return "N/A"
+        try:
+            return "%.4f" % se_val
+        except Exception:
+            return "N/A"
 
     values = []
 
@@ -493,27 +597,80 @@ def make_table(result_dict, column: str = "results", sort_results: bool = False)
 
         for (mf), v in metric_items:
             m, _, f = mf.partition(",")
-            if m.endswith("_stderr"):
+            # Skip stderr and stability metric variants - they'll be shown as columns
+            if m.endswith("_stderr") or m.endswith("_stderr_clt") or m.endswith("_stderr_clustered"):
+                continue
+            if m.endswith("_expected_accuracy") or m.endswith("_consensus_accuracy"):
+                continue
+            if m.endswith("_internal_variance") or m.endswith("_consistency_rate"):
+                continue
+            # Skip paired t-test fields - they'll be shown as columns, not separate rows
+            if m.startswith("paired_"):
                 continue
 
             hib = HIGHER_IS_BETTER_SYMBOLS.get(higher_is_better.get(m), "")
 
+            # Save original numeric value for diff calculation
+            v_numeric = v if isinstance(v, (int, float)) else None
             v = "%.4f" % v if isinstance(v, float) else v
             if v == "" or v is None:
                 v = "N/A"
 
-            if m + "_stderr" + "," + f in dic:
-                # if dic[m + "_stderr" + "," + f] != []:
-                se = dic[m + "_stderr" + "," + f]
-                se = "   N/A" if se == "N/A" or se == [] else "%.4f" % se
-                if v != []:
-                    values.append([k, version, f, n, m, hib, v, "±", se])
+            # Bootstrap stderr (original)
+            se = fmt_se(dic.get(m + "_stderr," + f))
+            # CLT stderr
+            se_clt = fmt_se(dic.get(m + "_stderr_clt," + f))
+            # Clustered stderr
+            se_clustered = fmt_se(dic.get(m + "_stderr_clustered," + f))
+            # Stability metrics (EA, CA, IV, CR)
+            ea = fmt_se(dic.get(m + "_expected_accuracy," + f))
+            ca = fmt_se(dic.get(m + "_consensus_accuracy," + f))
+            iv = fmt_se(dic.get(m + "_internal_variance," + f))
+            cr = fmt_se(dic.get(m + "_consistency_rate," + f))
+
+            # Baseline comparison columns (using paired_ prefix from JSON)
+            baseline_name = dic.get("paired_baseline")
+            baseline_str = str(baseline_name) if baseline_name else "N/A"
+            # Diff column: computed from current value - baseline_score (e.g., -25.0%)
+            baseline_score = dic.get("paired_baseline_score")
+            if v_numeric is not None and isinstance(baseline_score, (int, float)):
+                diff = v_numeric - baseline_score
+                diff_str = "%+.1f%%" % diff
             else:
-                values.append([k, version, f, n, m, hib, v, "", ""])
-            # k = ""
-            # version = ""
-    md_writer.value_matrix = values
-    latex_writer.value_matrix = values
+                diff_str = "N/A"
+            # CI column: confidence interval (e.g., [-63.7%, +13.7%])
+            ci_lower = dic.get("paired_ci_lower")
+            ci_upper = dic.get("paired_ci_upper")
+            if isinstance(ci_lower, (int, float)) and isinstance(ci_upper, (int, float)):
+                ci_str = "[%+.1f%%, %+.1f%%]" % (ci_lower, ci_upper)
+            else:
+                ci_str = "N/A"
+            # P_Value column
+            pval = dic.get("paired_pvalue")
+            pval_str = "%.4f*" % pval if isinstance(pval, (int, float)) and pval < 0.05 else ("%.4f" % pval if isinstance(pval, (int, float)) else "N/A")
+
+            # Check if v is not empty (handle numpy array safely)
+            is_empty = hasattr(v, "__len__") and not isinstance(v, str) and len(v) == 0
+            if not is_empty:
+                values.append([k, version, f, n, m, hib, v, "±", se, se_clt, se_clustered, ea, ca, iv, cr, baseline_str, diff_str, ci_str, pval_str])
+
+    # Determine which optional columns to hide (all values are N/A)
+    cols_to_hide = set()
+    for col_idx in optional_col_indices:
+        all_na = all(row[col_idx] == "N/A" for row in values) if values else True
+        if all_na:
+            cols_to_hide.add(col_idx)
+
+    # Filter headers and values to exclude hidden columns
+    final_headers = [h for i, h in enumerate(all_headers) if i not in cols_to_hide]
+    final_values = [[v for i, v in enumerate(row) if i not in cols_to_hide] for row in values]
+
+    md_writer = MarkdownTableWriter()
+    latex_writer = LatexTableWriter()
+    md_writer.headers = final_headers
+    latex_writer.headers = final_headers
+    md_writer.value_matrix = final_values
+    latex_writer.value_matrix = final_values
 
     # todo: make latex table look good
     # print(latex_writer.dumps())
@@ -581,7 +738,7 @@ def get_git_commit_hash():
     try:
         git_hash = subprocess.check_output(["git", "describe", "--always"]).strip()
         git_hash = git_hash.decode()
-    except subprocess.CalledProcessError or FileNotFoundError:
+    except (subprocess.CalledProcessError, FileNotFoundError):
         # FileNotFoundError occurs when git not installed on system
         git_hash = None
     return git_hash
@@ -595,7 +752,6 @@ def get_datetime_str(timezone="Asia/Singapore"):
     tz = pytz.timezone(timezone)
     utc_now = datetime.datetime.now(datetime.timezone.utc)
     local_time = utc_now.astimezone(tz)
-    return local_time.strftime("%Y%m%d_%H%M%S")
     return local_time.strftime("%Y%m%d_%H%M%S")
 
 
@@ -616,14 +772,25 @@ def import_function(loader, node):
     *module_name, function_name = function_name.split(".")
     if isinstance(module_name, list):
         module_name = ".".join(module_name)
+
+    # 1) Try relative file import (original behavior)
     module_path = os.path.normpath(os.path.join(yaml_path, "{}.py".format(module_name)))
+    if os.path.exists(module_path):
+        spec = importlib.util.spec_from_file_location(module_name, module_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        function = getattr(module, function_name)
+        return function
 
-    spec = importlib.util.spec_from_file_location(module_name, module_path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
-    function = getattr(module, function_name)
-    return function
+    # 2) Fallback to absolute module import (enables cross-task utils like
+    #    lmms_eval.tasks.librispeech.utils.librispeech_doc_to_audio)
+    try:
+        module = importlib.import_module(module_name)
+        function = getattr(module, function_name)
+        return function
+    except Exception as ex:
+        # Re-raise with context to aid debugging
+        raise ImportError(f"Failed to import function '{function_name}' from module '{module_name}'. " f"Tried relative path '{module_path}' and absolute import.") from ex
 
 
 def load_yaml_config(yaml_path=None, yaml_config=None, yaml_dir=None, mode="full"):
@@ -687,13 +854,20 @@ def apply_template(template: str, doc: dict) -> str:
     return rtemplate.render(**doc)
 
 
-def create_iterator(raw_iterator, rank, world_size, limit=None):
+def create_iterator(raw_iterator, rank, world_size, limit=None, offset=0):
     """
     Method for creating a (potentially) sliced and limited
     iterator from a raw document iterator. Used for splitting data
-    among ranks in multigpu setting or only pulling a sample of documents
+    among ranks in multigpu setting or only pulling a sample of documents.
+    Offset applies before rank sharding.
     """
-    return islice(raw_iterator, rank, limit, world_size)
+    if offset is None:
+        offset = 0
+    if offset < 0:
+        raise ValueError(f"offset must be >= 0, got {offset}")
+    start = rank + offset
+    stop = None if limit is None else offset + limit
+    return islice(raw_iterator, start, stop, world_size)
 
 
 def pad_and_concat(
@@ -1017,18 +1191,3 @@ class Collator:
 
         if arr:
             yield arr
-
-
-def replace_qwen_on_multiple_devices(module,method):
-    from kv_cache_compression.qwen_model import qwen_attention_forward_streamingLLM
-    if method=='streamingllm':
-        eval_logger.info(f"using streamingllm")
-        module.forward = types.MethodType(qwen_attention_forward_streamingLLM, module)
-        
-        
-def replace_llama_on_multiple_devices(module,method):
-    pass
-
-
-def replace_mistral_on_multiple_devices(module,method):
-    pass

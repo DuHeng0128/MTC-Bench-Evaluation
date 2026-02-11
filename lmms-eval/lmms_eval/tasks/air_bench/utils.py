@@ -1,9 +1,7 @@
-import datetime
 import json
 import os
 import random
 import re
-import sys
 import time
 from pathlib import Path
 
@@ -37,7 +35,7 @@ with open(Path(__file__).parent / "_default_template_yaml", "r") as f:
     config = yaml.safe_load("".join(safe_data))
 
 # specify api type and key in .env
-GPT_EVAL_MODEL_NAME = config["metadata"]["gpt_eval_model_name"]
+GPT_EVAL_MODEL_NAME = os.getenv("MODEL_VERSION", "gpt-4o-2024-11-20")
 API_TYPE = os.getenv("API_TYPE", "azure")
 
 if API_TYPE == "openai":
@@ -132,7 +130,10 @@ def air_bench_process_results_chat(doc, result):
     eval_answer2, model_name2 = get_eval(max_tokens=1024, content=content)
 
     return {
-        "gpt_eval": {"eval_answer": [eval_answer, eval_answer2], "model_name": model_name},
+        "gpt_eval": {
+            "eval_answer": [eval_answer, eval_answer2],
+            "model_name": model_name,
+        },
     }
 
 
@@ -189,7 +190,10 @@ def air_bench_process_results_foundation(doc, result):
     score = 1.0 if pred == gt_ans else 0.0
     submission_dict = {}
     submission_dict = {doc.get("uniq_id", "unknown"): pred}
-    return {"accuracy": {"score": score, "task": doc["task_name"]}, "submission": submission_dict}
+    return {
+        "accuracy": {"score": score, "task": doc["task_name"]},
+        "submission": submission_dict,
+    }
 
 
 def air_bench_aggregate_results_for_submission(results, args):
@@ -211,7 +215,15 @@ def air_bench_aggregate_results_foundation(results):
         categorical_correct[result["task"]] += result["score"]
         categorical_total[result["task"]] += 1
 
-    return {"overall_accuracy": score / len(results), "categorical_accuracy": {task: categorical_correct[task] / categorical_total[task] for task in categorical_correct.keys()}}
+    overall_accuracy = round(score / len(results), 5)
+    categorical_accuracy = {task: round(categorical_correct[task] / categorical_total[task], 5) for task in categorical_correct.keys()}
+
+    eval_logger.info("=" * 50)
+    eval_logger.info(f"Overall accuracy: {overall_accuracy}")
+    for task, acc in categorical_accuracy.items():
+        eval_logger.info(f"{task} accuracy: {acc}")
+    eval_logger.info("=" * 50)
+    return overall_accuracy
 
 
 def parse_multi_choice_response(response, all_choices):

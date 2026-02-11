@@ -1,11 +1,11 @@
-import datetime
-import json
+import base64
+import io
 import os
+import string
 from collections import defaultdict
 
 from loguru import logger as eval_logger
-
-from lmms_eval.tasks._task_utils.file_utils import generate_submission_file
+from PIL import Image
 
 dir_name = os.path.dirname(os.path.abspath(__file__))
 
@@ -26,6 +26,40 @@ def mmstar_doc_to_visual(doc):
     return [doc["image"].convert("RGB")]
 
 
+def mmstar_oc_doc_to_visual(doc):
+    """
+    Opencompass version of MMStar
+    https://huggingface.co/datasets/morpheushoc/MMStar_opencompass
+    """
+    byte_string = doc["image"]
+    img_data = base64.b64decode(byte_string)
+    image = Image.open(io.BytesIO(img_data))
+    return [image]
+
+
+def mmstar_oc_doc_to_text(doc, lmms_eval_specific_kwargs=None):
+    """
+    Opencompass version of MMStar: https://huggingface.co/datasets/morpheushoc/MMStar_opencompass
+    Modified from: https://github.com/open-compass/VLMEvalKit/blob/19c0e386c0967936b5ab4357abdabd670ba5d361/vlmeval/vlm/qwen3_vl/prompt.py#L93
+    """
+    pre_prompt = lmms_eval_specific_kwargs.get("pre_prompt", "")
+    post_prompt = lmms_eval_specific_kwargs.get("post_prompt", "")
+
+    question = doc["question"]
+    question = question.replace("<image 1>", "")
+    options = {cand: doc[cand] for cand in string.ascii_uppercase if cand in doc}
+
+    options_prompt = "Options:\n"
+    for key, item in options.items():
+        options_prompt += f"{key}. {item}\n"
+
+    prompt = f"{pre_prompt}{question}\n"
+    prompt += options_prompt
+    prompt += f"{post_prompt}"
+    prompt = prompt.rstrip()
+    return prompt
+
+
 def mmstar_doc_to_text(doc, lmms_eval_specific_kwargs=None):
     question = doc["question"].strip()
     if "pre_prompt" in lmms_eval_specific_kwargs and lmms_eval_specific_kwargs["pre_prompt"] != "":
@@ -39,8 +73,8 @@ def mmstar_doc_to_text(doc, lmms_eval_specific_kwargs=None):
 
 def exact_match(pred, gt):
     """Brought from MMStar"""
-    answer = gt.lower().strip().replace("\n", " ")
-    predict = pred.lower().strip().replace("\n", " ")
+    answer = gt.lower().replace("\n", " ").strip()
+    predict = pred.lower().replace("\n", " ").strip()
     try:
         if answer == predict[0]:
             return 1.0
@@ -50,9 +84,44 @@ def exact_match(pred, gt):
             return 1.0
         elif predict[0:14] == "the answer is " and answer == predict[14]:
             return 1.0
-    except Exception as e:
+    except Exception:
         return 0.0
     return 0.0
+
+
+def exact_match_ko(pred, gt):
+    """Brought from MMStar"""
+    answer = gt.lower().replace("\n", " ").strip()
+    predict = pred.lower().replace("\n", " ").strip()
+    try:
+        if answer == predict[0]:
+            return 1.0
+        elif predict[0] == "(" and answer == predict[1]:
+            return 1.0
+        elif predict[0:3] == "옵션 " and answer == predict[3]:
+            return 1.0
+        elif predict[0:4] == "정답은 " and answer == predict[4]:
+            return 1.0
+    except Exception:
+        return 0.0
+    return 0.0
+
+
+def mmstar_process_results_ko(doc, results):
+    """
+    Args:
+        doc: a instance of the eval dataset
+        results: [pred]
+    Returns:
+        a dictionary with key: metric name, value: metric value
+    """
+    pred = results[0]
+    gt = doc["answer"]
+
+    score = exact_match_ko(pred, gt)
+    category = doc["category"]
+    l2_category = doc["l2_category"]
+    return {category: {"question_id": doc["index"], "l2_category": l2_category, "score": score}, "average": {"question_id": doc["index"], "l2_category": l2_category, "score": score}}
 
 
 def mmstar_process_results(doc, results):

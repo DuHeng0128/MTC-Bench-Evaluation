@@ -1,4 +1,4 @@
-transformers==4.47.1
+transformers==4.56.1
 pandas
 numpy
 evaluate

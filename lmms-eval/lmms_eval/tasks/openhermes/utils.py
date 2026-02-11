@@ -1,18 +1,11 @@
-import datetime
-import json
 import os
-import random
 import re
-import sys
 import time
 from pathlib import Path
 
 import requests
 import yaml
 from loguru import logger as eval_logger
-
-import lmms_eval.tasks._task_utils.file_utils as file_utils
-from lmms_eval.filters.extraction import ExtendedRegexFilter
 
 
 def doc_to_audio(doc):
@@ -36,7 +29,7 @@ with open(Path(__file__).parent / "openhermes.yaml", "r") as f:
     config = yaml.safe_load("".join(safe_data))
 
 # specify api type and key in .env
-GPT_EVAL_MODEL_NAME = config["metadata"]["gpt_eval_model_name"]
+GPT_EVAL_MODEL_NAME = os.getenv("MODEL_VERSION", "gpt-4o-2024-11-20")
 API_TYPE = os.getenv("API_TYPE", "azure")
 
 if API_TYPE == "openai":

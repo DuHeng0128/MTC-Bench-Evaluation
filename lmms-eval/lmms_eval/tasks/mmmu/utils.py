@@ -10,10 +10,8 @@ import numpy as np
 import yaml
 from loguru import logger as eval_logger
 
+from lmms_eval.llm_judge import ServerConfig, get_server
 from lmms_eval.tasks._task_utils.file_utils import generate_submission_file
-
-MULTI_CHOICE_PROMPT = "Answer with the option's letter from the given choices directly."
-OPEN_ENDED_PROMPT = "Answer the question using a single word or phrase."
 
 with open(Path(__file__).parent / "_default_template_yaml", "r") as f:
     raw_data = f.readlines()
@@ -24,6 +22,15 @@ with open(Path(__file__).parent / "_default_template_yaml", "r") as f:
             safe_data.append(line)
 
     config = yaml.safe_load("".join(safe_data))
+
+API_TYPE = os.getenv("API_TYPE", "openai")
+MODEL_VERSION = os.getenv("MODEL_VERSION", "gpt-4o-2024-11-20")
+
+# Initialize the judge server
+server_config = ServerConfig(
+    model_name=MODEL_VERSION,
+)
+server = get_server(server_name=API_TYPE, config=server_config)
 
 
 def replace_images_tokens(input_string):
@@ -41,23 +48,102 @@ def parse_options(options):
     return choices_str
 
 
-def construct_prompt(doc):
+def construct_prompt(doc, mc_prompt="", open_ended_prompt="", prompt_type="reasoning"):
     question = doc["question"]
     if doc["question_type"] == "multiple-choice":
         # Weirdly, data["options"] is a string in MMMU Huggingface dataset
         parsed_options = parse_options(ast.literal_eval(doc["options"]))
         # parsed_options already prepends a newline so no need to add space here
-        question = f"{question}\n{parsed_options}\n\n{MULTI_CHOICE_PROMPT}"
+        question = f"{question}\n{parsed_options}\n\n{mc_prompt}"
     else:
-        question = f"{question}\n\n{OPEN_ENDED_PROMPT}"
+        question = f"{question}\n\n{open_ended_prompt}"
+
     return question
 
 
-def mmmu_doc_to_text(doc):
-    question = construct_prompt(doc)
+def mmmu_doc_to_text(doc, lmms_eval_specific_kwargs=None):
+    if lmms_eval_specific_kwargs is None:
+        question = construct_prompt(doc)
+    elif "format" in lmms_eval_specific_kwargs and lmms_eval_specific_kwargs["format"] == "qwen3_vl":
+        return mmmu_doc_to_text_qwen3vl(doc, lmms_eval_specific_kwargs)
+    else:
+        question = construct_prompt(doc, lmms_eval_specific_kwargs["multiple_choice_prompt"], lmms_eval_specific_kwargs["open_ended_prompt"], lmms_eval_specific_kwargs["prompt_type"])
     if config["metadata"]["interleaved_format"]:
         question = replace_images_tokens(question)
+
     return question
+
+
+def mmmu_doc_to_text_qwen3vl(doc, lmms_eval_specific_kwargs=None):
+    """
+    Adapted from Qwen3-VL Technical Report: https://arxiv.org/pdf/2511.21631
+    """
+    pre_prompt = lmms_eval_specific_kwargs.get("pre_prompt", "")
+    post_prompt = lmms_eval_specific_kwargs.get("post_prompt", "")
+    open_ended_prompt = lmms_eval_specific_kwargs.get("open_ended_prompt", "")
+
+    question = doc["question"]
+    options = parse_options(ast.literal_eval(doc["options"]))
+    question_type = doc["question_type"]
+
+    if question_type == "multiple-choice":
+        prompt = f"{pre_prompt}{question}\nOptions:\n{options}\n{post_prompt}"
+    else:
+        # open ended question
+        prompt = f"{pre_prompt}{question}\nOptions:\n{options}\n{open_ended_prompt}"
+
+    return prompt
+
+
+def mmmu_doc_to_messages_qwen3vl(doc, lmms_eval_specific_kwargs=None):
+    # If you use doc to messages, the interleaved format is always used
+    question = mmmu_doc_to_text(doc, lmms_eval_specific_kwargs)
+    visuals = mmmu_doc_to_visual(doc)
+    messages = [{"role": "user", "content": []}]
+
+    for img in visuals:
+        messages[0]["content"].append({"type": "image", "url": img})
+    messages[0]["content"].append({"type": "text", "text": question})
+    return messages
+
+
+def mmmu_doc_to_messages(doc, lmms_eval_specific_kwargs=None):
+
+    if "format" in lmms_eval_specific_kwargs and lmms_eval_specific_kwargs["format"] == "qwen3_vl":
+        return mmmu_doc_to_messages_qwen3vl(doc, lmms_eval_specific_kwargs)
+
+    # If you use doc to messages, the interleaved format is always used
+    config["metadata"]["interleaved_format"] = True
+    question = mmmu_doc_to_text(doc, lmms_eval_specific_kwargs)
+    visuals = mmmu_doc_to_visual(doc)
+
+    # Duplicate the single image when NUM_IMAGE=2
+    num_image = int(os.environ.get("NUM_IMAGE", "1"))
+    if num_image == 1:
+        pass
+    elif num_image == 2:
+        if len(visuals) == 1:
+            visuals = [visuals[0], visuals[0]]
+    else:
+        raise ValueError(f"num_image must be 1 or 2, got {num_image}")
+
+    messages = [{"role": "user", "content": []}]
+    interleaved_content = question.split("<image>")
+
+    # Allow more visuals than placeholders by only attaching pre-image text
+    # if a corresponding segment exists. Always append the final trailing text.
+    for i in range(len(visuals)):
+        if i < len(interleaved_content) - 1:
+            text = interleaved_content[i].strip()
+            if text != "":
+                messages[0]["content"].append({"type": "text", "text": text})
+        messages[0]["content"].append({"type": "image", "url": visuals[i]})
+
+    # Append the trailing text after the last image
+    if len(interleaved_content) > 0:
+        messages[0]["content"].append({"type": "text", "text": interleaved_content[-1].strip()})
+
+    return messages
 
 
 def mmmu_doc_to_visual(doc):
@@ -70,20 +156,54 @@ def mmmu_doc_to_visual(doc):
 
 
 def mmmu_process_results(doc, results):
-    pred = results[0]
-    if doc["question_type"] == "multiple-choice":
-        index2ans, all_choices = get_multi_choice_info(ast.literal_eval(doc["options"]))
-        parsed_pred = parse_multi_choice_response(pred, all_choices, index2ans)
-    else:
-        parsed_pred = parse_open_response(pred)
-    id = doc["id"]
-    mmmu_acc = {"id": id, "subdomain": extract_subset_name(doc["id"]), "question_type": doc["question_type"], "answer": doc["answer"], "parsed_pred": parsed_pred}
-    return {
-        "mmmu_acc": mmmu_acc,
-        "submission": {
-            id: pred,
-        },
-    }
+    parsed_preds = []
+    for pred in results:
+        if doc["question_type"] == "multiple-choice":
+            index2ans, all_choices = get_multi_choice_info(ast.literal_eval(doc["options"]))
+            parsed_pred = parse_multi_choice_response(pred, all_choices, index2ans)
+        else:
+            parsed_pred = parse_open_response(pred)
+            parsed_pred = str(parsed_pred[0]) if parsed_pred else ""
+        parsed_preds.append(parsed_pred)
+    mmmu_submission = {doc["id"]: parsed_preds[0]}
+    mmmu_exact_acc = {"id": doc["id"], "subdomain": extract_subset_name(doc["id"]), "question_type": doc["question_type"], "answer": doc["answer"], "parsed_pred": parsed_preds}
+    return {"mmmu_acc": mmmu_exact_acc, "mmmu_acc_pass_at_k": mmmu_exact_acc, "submission": mmmu_submission}
+
+
+def mmmu_reasoning_process_results(doc, results):
+    parsed_preds = []
+    scores = []
+    for pred in results:
+        formatted_question = construct_prompt(doc)
+        # Extract content from <answer> tags if present, handling potential spaces
+        answer = doc["answer"]
+        if isinstance(pred, str):
+            match = re.search(r"<answer>\s*([\s\S]*?)\s*</answer>", pred)
+            if match:
+                pred = match.group(1).strip()
+
+        try:
+            # Use the llm_judge API for binary evaluation
+            result = server.evaluate_binary(question=formatted_question, answer=str(answer), prediction=pred, output_format="0/1")
+
+            # Parse the result
+            if result["success"]:
+                judge_response = result["result"]
+                judge_score = int(judge_response) if type(judge_response) == str else judge_response
+            else:
+                eval_logger.error(f"Judge evaluation failed: {result.get('raw_response', 'Unknown error')}")
+                judge_score = 0
+
+        except Exception as e:
+            eval_logger.error(f"Error getting judge response: {e}")
+            judge_score = 0
+
+        scores.append(judge_score)
+        parsed_preds.append(pred)
+
+    # Calculate the average score for this document
+    avg_score = sum(1 if score == 1 else 0 for score in scores) / len(scores) if scores else 0
+    return {"llm_as_judge_eval": avg_score}
 
 
 def extract_subset_name(input_string):
@@ -253,16 +373,20 @@ def evaluate_mmmu(samples):
     judge_dict = dict()
     for sample in samples:
         gold_i = sample["answer"]
-        pred_i = sample["parsed_pred"]
-        if sample["question_type"] == "multiple-choice":
-            correct = eval_multi_choice(gold_i, pred_i)
-        else:  # open question
-            correct = eval_open(gold_i, pred_i)
+        pred_list = sample["parsed_pred"]
+        correct = False
+        for pred_i in pred_list:
+            if sample["question_type"] == "multiple-choice":
+                correct = eval_multi_choice(gold_i, pred_i)
+            else:  # open question
+                correct = eval_open(gold_i, pred_i)
 
-        if correct:
-            judge_dict[sample["id"]] = "Correct"
-            pred_correct += 1
-        else:
+            if correct:
+                judge_dict[sample["id"]] = "Correct"
+                pred_correct += 1
+                break
+
+        if not correct:
             judge_dict[sample["id"]] = "Wrong"
 
     if len(samples) == 0:

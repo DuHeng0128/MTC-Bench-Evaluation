@@ -10,17 +10,13 @@ import re
 import shutil
 import subprocess
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from functools import partial
 from glob import glob
 from typing import (
     Any,
-    Dict,
-    Iterable,
     Iterator,
     List,
-    Literal,
-    Mapping,
     Optional,
     Tuple,
     Union,
@@ -29,9 +25,10 @@ from typing import (
 import datasets
 import numpy as np
 from accelerate import Accelerator
-from datasets import DownloadConfig, Image, Sequence
+from datasets import Audio, DownloadConfig, Image, Sequence
 from huggingface_hub import snapshot_download
 from loguru import logger as eval_logger
+from PIL import Image as PIL_Image
 from PIL import ImageFile
 from tenacity import retry, stop_after_attempt, stop_after_delay, wait_fixed
 from tqdm import tqdm
@@ -43,7 +40,6 @@ from lmms_eval.api.registry import (
     AGGREGATION_REGISTRY,
     DEFAULT_METRIC_REGISTRY,
     METRIC_REGISTRY,
-    OUTPUT_TYPE_REGISTRY,
     get_aggregation,
     get_metric,
     get_metric_aggregation,
@@ -91,6 +87,7 @@ class TaskConfig(dict):
     doc_to_text: Union[Callable, str] = None
     doc_to_target: Union[Callable, str] = None
     doc_to_choice: Union[Callable, str, dict, list] = None
+    doc_to_messages: Callable = None
     process_results: Union[Callable, str] = None
     use_prompt: str = None
     description: str = ""
@@ -108,6 +105,10 @@ class TaskConfig(dict):
     should_decontaminate: bool = False
     doc_to_decontamination_query: str = None
 
+    # Statistical evaluation options
+    cluster_key: str = None  # Field name in process_results dict for clustering (e.g., "videoID")
+    score_key: str = "score"  # Field name in process_results dict for 0/1 score (default: "score")
+
     metadata: Union[str, list] = None  # by default, not used in the code. allows for users to pass arbitrary info to tasks
 
     lmms_eval_specific_kwargs: dict = None
@@ -116,8 +117,7 @@ class TaskConfig(dict):
 
     def __post_init__(self) -> None:
         if self.dataset_path and os.path.exists(os.path.dirname(self.dataset_path)):
-            import inspect
-            from importlib import import_module
+            pass
 
             # self.dataset_path = inspect.getfile(import_module(self.dataset_path))
 
@@ -180,7 +180,7 @@ class TaskConfig(dict):
 
 class Task(abc.ABC):
     """A task represents an entire benchmark including its dataset, problems,
-    answers, and evaluation methods. See BoolQ for a simple example implementation
+    answers, and evaluation methods. See MME for a simple example implementation
 
     A `doc` can be any python object which represents one instance of evaluation.
     This is usually a dictionary e.g.
@@ -268,9 +268,13 @@ class Task(abc.ABC):
             cache_dir=cache_dir,
             download_mode=download_mode,
         )
-        # Create dataset_no_image by removing image columns from the loaded dataset
-        # instead of loading the dataset twice
-        self.dataset_no_image = self.dataset.copy()
+        self.dataset_no_image = datasets.load_dataset(
+            path=self.DATASET_PATH,
+            name=self.DATASET_NAME,
+            data_dir=data_dir,
+            cache_dir=cache_dir,
+            download_mode=download_mode,
+        )
         for doc_name in self.dataset_no_image:
             remove_cols = []
             features = self.dataset_no_image[doc_name].features
@@ -379,6 +383,7 @@ class Task(abc.ABC):
         self,
         *,
         limit: Union[int, None] = None,
+        offset: int = 0,
         rank: int = 0,
         world_size: int = 1,
         cache_requests: bool = False,
@@ -403,6 +408,8 @@ class Task(abc.ABC):
         og_limit = limit
 
         cache_key = f"requests-{self._config.task}-{self.config.num_fewshot}shot-rank{rank}-world_size{world_size}"
+        if offset:
+            cache_key += f"-offset{offset}"
         cache_key += "-chat_template" if apply_chat_template else ""
         cache_key += "-fewshot_as_multiturn" if fewshot_as_multiturn else ""
         cache_key += f"-system_prompt_hash{utils.hash_string(system_instruction)}" if system_instruction is not None else ""
@@ -426,9 +433,32 @@ class Task(abc.ABC):
         if cache_requests and (not cached_instances or rewrite_requests_cache) and limit is not None:
             limit = None
 
-        doc_id_docs = list(self.doc_iterator(rank=rank, limit=limit, world_size=world_size))
+        doc_id_docs = utils.create_iterator(
+            enumerate(self.eval_docs_no_media),
+            rank=rank,
+            limit=int(limit) if limit else None,
+            world_size=world_size,
+            offset=offset,
+        )
+        doc_iterator_for_counting = (
+            utils.create_iterator(
+                range(len(self.test_docs())),
+                rank=rank,
+                limit=limit,
+                world_size=world_size,
+                offset=offset,
+            )
+            if self.has_test_docs()
+            else utils.create_iterator(
+                range(len(self.validation_docs())),
+                rank=rank,
+                limit=limit,
+                world_size=world_size,
+                offset=offset,
+            )
+        )
 
-        num_docs = len(doc_id_docs)
+        num_docs = sum(1 for _ in doc_iterator_for_counting)
 
         for doc_id, doc in tqdm(
             doc_id_docs,
@@ -585,7 +615,8 @@ class Task(abc.ABC):
         example = self.doc_to_text(doc)
         return description + labeled_examples + example
 
-    def apply_filters(self):
+    def apply_filters(self) -> Optional[List[Instance]]:
+        """Iterates over FilterEnsembles and applies them to instances"""
         if hasattr(self, "_filters"):
             for f in self._filters:
                 f.apply(self._instances, None)
@@ -653,13 +684,14 @@ class Task(abc.ABC):
         else:
             raise ValueError(f"Task dataset (path={self.DATASET_PATH}, name={self.DATASET_NAME}) must have valid or test docs!")
 
-    def doc_iterator(self, *, rank: int = 0, limit: Union[int, None] = None, world_size: int = 1) -> Iterator[Tuple[int, Any]]:
+    def doc_iterator(self, *, rank: int = 0, limit: Union[int, None] = None, world_size: int = 1, offset: int = 0) -> Iterator[Tuple[int, Any]]:
         limit = int(limit) if limit else None
         doc_iterator = utils.create_iterator(
             enumerate(self.eval_docs),
             rank=int(rank),
             limit=limit,
             world_size=int(world_size),
+            offset=offset,
         )
         return doc_iterator
 
@@ -936,9 +968,14 @@ class ConfigurableTask(Task):
                     force_unzip = dataset_kwargs.get("force_unzip", False)
                     revision = dataset_kwargs.get("revision", "main")
                     create_link = dataset_kwargs.get("create_link", False)
-                    cache_path = snapshot_download(repo_id=self.DATASET_PATH, revision=revision, repo_type="dataset", force_download=force_download, etag_timeout=60)
-                    zip_files = glob(os.path.join(cache_path, "**/*.zip"), recursive=True)
-                    tar_files = glob(os.path.join(cache_path, "**/*.tar*"), recursive=True)
+                    # If the user already has a cache dir, we skip download the zip files
+                    if not os.path.exists(cache_dir):
+                        cache_path = snapshot_download(repo_id=self.DATASET_PATH, revision=revision, repo_type="dataset", force_download=force_download, etag_timeout=60)
+                        zip_files = glob(os.path.join(cache_path, "**/*.zip"), recursive=True)
+                        tar_files = glob(os.path.join(cache_path, "**/*.tar*"), recursive=True)
+                    else:
+                        zip_files = []
+                        tar_files = []
 
                     def unzip_video_data(zip_file):
                         import os
@@ -982,6 +1019,7 @@ class ConfigurableTask(Task):
                         # Group tar parts together
                         for tar_file in tar_files:
                             base_name = tar_file.split(".tar")[0]
+                            base_name = re.sub(r"_\d+$", "", base_name)
                             if base_name not in tar_parts_dict:
                                 tar_parts_dict[base_name] = []
                             tar_parts_dict[base_name].append(tar_file)
@@ -991,10 +1029,10 @@ class ConfigurableTask(Task):
                             eval_logger.info(f"Extracting following tar files: {parts}")
                             output_tar = base_name + ".tar"
                             if not os.path.exists(output_tar):
-                                eval_logger.info(f"Start concatenating tar files")
+                                eval_logger.info("Start concatenating tar files")
 
                                 concat_tar_parts(parts, output_tar)
-                                eval_logger.info(f"Finish concatenating tar files")
+                                eval_logger.info("Finish concatenating tar files")
 
                             if not os.path.exists(os.path.join(cache_dir, os.path.basename(base_name))):
                                 untar_video_data(output_tar)
@@ -1031,10 +1069,9 @@ class ConfigurableTask(Task):
                 dataset_kwargs.pop("create_link")
 
         if dataset_kwargs is not None and "load_from_disk" in dataset_kwargs and dataset_kwargs["load_from_disk"]:
-            dataset_kwargs.pop("load_from_disk")
             # using local task in offline environment, need to process the online dataset into local format via
             # `ds = load_datasets("lmms-lab/MMMU")`
-            self.dataset = datasets.load_from_disk(path=self.DATASET_PATH, name=self.DATASET_NAME)
+            self.dataset = datasets.load_from_disk(dataset_path=self.DATASET_PATH)
         else:
             self.dataset = datasets.load_dataset(
                 path=self.DATASET_PATH,
@@ -1049,8 +1086,13 @@ class ConfigurableTask(Task):
                 if split in [self.config.training_split, self.config.validation_split, self.config.test_split, self.config.fewshot_split]:
                     self.dataset[split] = self.config.process_docs(self.dataset[split])
 
+        if not isinstance(self.dataset, datasets.DatasetDict):
+            # Determine which split this dataset belongs to
+            split_name = self.config.test_split or self.config.validation_split or self.config.training_split or "test"
+            self.dataset = datasets.DatasetDict({split_name: self.dataset})
+
         # copy dataset, remove image features
-        self.dataset_no_image = self.dataset.copy()
+        self.dataset_no_image = {split: self.dataset[split] for split in self.dataset}
         for doc_name in self.dataset_no_image:
             remove_cols = []
             features = self.dataset_no_image[doc_name].features
@@ -1059,6 +1101,8 @@ class ConfigurableTask(Task):
                 if isinstance(features[feature], Image):
                     remove_cols.append(feature)
                 elif isinstance(features[feature], Sequence) and isinstance(features[feature].feature, Image):
+                    remove_cols.append(feature)
+                elif isinstance(features[feature], Audio):
                     remove_cols.append(feature)
             for remove_col in remove_cols:
                 self.dataset_no_image[doc_name] = self.dataset_no_image[doc_name].remove_columns(remove_col)
@@ -1089,9 +1133,26 @@ class ConfigurableTask(Task):
         if self.has_validation_docs():
             return self.dataset[self.config.validation_split]
 
+    def validation_docs_no_media(self) -> datasets.Dataset:
+        if self.has_validation_docs():
+            return self.dataset_no_image[self.config.validation_split]
+
     def test_docs(self) -> datasets.Dataset:
         if self.has_test_docs():
             return self.dataset[self.config.test_split]
+
+    def test_docs_no_media(self) -> datasets.Dataset:
+        if self.has_test_docs():
+            return self.dataset_no_image[self.config.test_split]
+
+    @property
+    def eval_docs_no_media(self) -> Union[datasets.Dataset, List[dict]]:
+        if self.has_test_docs():
+            return self.test_docs_no_media()
+        elif self.has_validation_docs():
+            return self.validation_docs_no_media()
+        else:
+            raise ValueError(f"Task dataset (path={self.DATASET_PATH}, name={self.DATASET_NAME}) must have valid or test docs!")
 
     def fewshot_docs(self):
         if self.config.fewshot_split is not None:
@@ -1110,6 +1171,7 @@ class ConfigurableTask(Task):
         apply_chat_template: bool = False,
         fewshot_as_multiturn: bool = False,
         chat_template: Optional[Callable] = None,
+        is_multimodal: bool = False,
     ) -> str:
         """Returns a fewshot context string that is made up of a prepended description
         (if provided), the `num_fewshot` number of examples, and an appended prompt example.
@@ -1158,50 +1220,78 @@ class ConfigurableTask(Task):
 
         # if few-shot - append examples after the system prompt
         if num_fewshot > 0:
-            if apply_chat_template:
-                labeled_examples.extend(self.sampler.get_chat_context(doc, num_fewshot, fewshot_as_multiturn))
+            if is_multimodal is False:
+                if apply_chat_template:
+                    labeled_examples.extend(self.sampler.get_chat_context(doc, num_fewshot, fewshot_as_multiturn))
+                else:
+                    labeled_examples += self.sampler.get_context(doc, num_fewshot)
             else:
-                labeled_examples += self.sampler.get_context(doc, num_fewshot)
+                if apply_chat_template:
+                    labeled_examples_text, labeled_examples_multimodal = self.sampler.get_multimodal_chat_context(doc, num_fewshot, fewshot_as_multiturn)
+                    labeled_examples.extend(labeled_examples_text)
+                else:
+                    labeled_examples_text, labeled_examples_multimodal = self.sampler.get_multimodal_context(doc, num_fewshot)
+                    labeled_examples += labeled_examples_text
 
         example = self.doc_to_text(doc)
-        if apply_chat_template:
-            if self.multiple_input:
+        if is_multimodal is False:
+            if apply_chat_template:
+                if self.multiple_input:
+                    return chat_template(labeled_examples)
+                if isinstance(example, str):
+                    self.append_target_question(labeled_examples, example, fewshot_as_multiturn)
+                # for loglikelihood create a list of questions with appended choices
+                elif isinstance(example, list):
+                    labeled_examples_list = []
+                    # copy chat history for each example and append the answer
+                    for ex in example:
+                        chat = copy.deepcopy(labeled_examples)
+                        self.append_target_question(chat, ex, fewshot_as_multiturn)
+                        labeled_examples_list.append(chat_template(chat))
+                    return labeled_examples_list
+                # if example is an integer, append the choice or convert to string
+                elif isinstance(example, int):
+                    if self.config.doc_to_choice is not None:
+                        choices = self.doc_to_choice(doc)
+                        self.append_target_question(labeled_examples, choices[example], fewshot_as_multiturn)
+                    else:
+                        self.append_target_question(labeled_examples, str(example), fewshot_as_multiturn)
+                    # return lm.apply_chat_template(labeled_examples)
                 return chat_template(labeled_examples)
-            if isinstance(example, str):
-                self.append_target_question(labeled_examples, example, fewshot_as_multiturn)
-            # for loglikelihood create a list of questions with appended choices
-            elif isinstance(example, list):
-                labeled_examples_list = []
-                # copy chat history for each example and append the answer
-                for ex in example:
-                    chat = deepcopy(labeled_examples)
-                    self.append_target_question(chat, ex, fewshot_as_multiturn)
-                    labeled_examples_list.append(chat_template(chat))
-                return labeled_examples_list
-            # if example is an integer, append the choice or convert to string
-            elif isinstance(example, int):
-                if self.config.doc_to_choice is not None:
-                    choices = self.doc_to_choice(doc)
-                    self.append_target_question(labeled_examples, choices[example], fewshot_as_multiturn)
-                else:
-                    self.append_target_question(labeled_examples, str(example), fewshot_as_multiturn)
-                # return lm.apply_chat_template(labeled_examples)
-            return chat_template(labeled_examples)
+            else:
+                if self.multiple_input:
+                    return labeled_examples
+                if isinstance(example, str):
+                    return labeled_examples + example
+                elif isinstance(example, list):
+                    return [labeled_examples + ex for ex in example]
+                elif isinstance(example, int):
+                    if self.config.doc_to_choice is not None:
+                        choices = self.doc_to_choice(doc)
+                        return labeled_examples + choices[example]
+                    else:
+                        return labeled_examples + str(example)
         else:
-            if self.multiple_input:
-                return labeled_examples
-            if isinstance(example, str):
-                return labeled_examples + example
-            elif isinstance(example, list):
-                return [labeled_examples + ex for ex in example]
-            elif isinstance(example, int):
-                if self.config.doc_to_choice is not None:
-                    choices = self.doc_to_choice(doc)
-                    return labeled_examples + choices[example]
+            if apply_chat_template:
+                raise NotImplementedError("Multimodal chat template not implemented yet")
+            else:
+                if self.multiple_input:
+                    return labeled_examples + "<image> " + example, labeled_examples_multimodal
+                if isinstance(example, str):
+                    return labeled_examples + "<image> " + example, labeled_examples_multimodal
                 else:
-                    return labeled_examples + str(example)
+                    raise NotImplementedError("Multimodal not implemented yet")
+                # elif isinstance(example, list):
+                #     return [labeled_examples + ex for ex in example]
+                # elif isinstance(example, int):
+                #     if self.config.doc_to_choice is not None:
+                #         choices = self.doc_to_choice(doc)
+                #         return labeled_examples + choices[example], labeled_examples_multimodal
+                #     else:
+                #         return labeled_examples + str(example), labeled_examples_multimodal
 
-    def apply_filters(self):
+    def apply_filters(self) -> Optional[List[Instance]]:
+        """Iterates over FilterEnsembles and applies them to instances"""
         if hasattr(self, "_filters"):
             for f in self._filters:
                 f.apply(self._instances, self.task_docs)
@@ -1372,6 +1462,8 @@ class ConfigurableTask(Task):
                     # doc=doc,
                     arguments=arg,
                     idx=i,
+                    task_name=self.config.task,
+                    doc_id=doc_id,
                     **kwargs,
                 )
                 for i, arg in enumerate(arguments)
@@ -1391,6 +1483,8 @@ class ConfigurableTask(Task):
                             # doc=doc,
                             arguments=("", "{}".format(choice)),
                             idx=i,
+                            task_name=self.config.task,
+                            doc_id=doc_id,
                             **kwargs,
                         )
                         for i, choice in enumerate(choices)
@@ -1408,7 +1502,10 @@ class ConfigurableTask(Task):
     @retry(stop=(stop_after_attempt(5) | stop_after_delay(1200)), wait=wait_fixed(2))
     def process_results(self, doc, results, full_docs=None):
         if self.OUTPUT_TYPE == "generate_until":
-            results[0] = results[0].strip()
+            if isinstance(results, list) and isinstance(results[0], list):
+                results = [res.strip() for res in results[0]]
+            else:
+                results = [res.strip() for res in results]
 
         kwargs = {}
         if full_docs is not None:
@@ -1419,7 +1516,6 @@ class ConfigurableTask(Task):
         result_dict = {}
         use_metric = list(self._metric_fn_list.keys())
         if self.OUTPUT_TYPE == "loglikelihood":
-            results = results[0]
             ll, is_greedy = results
             return {
                 **({"perplexity": ll} if "perplexity" in use_metric else {}),
@@ -1494,7 +1590,7 @@ class ConfigurableTask(Task):
 
         elif "generate_until" in self.OUTPUT_TYPE:
             gold = self.doc_to_target(doc)
-            result = results[0]
+            result = [res.strip() for res in results]
             if self.config.doc_to_choice is not None:
                 # If you set doc_to_choice,
                 # it assumes that doc_to_target returns a number.
@@ -1503,9 +1599,9 @@ class ConfigurableTask(Task):
             # we expect multiple_targets to be a list.
             elif self.multiple_target:
                 gold = list(gold)
-            elif type(gold) != type(result):
-                # cast gold to the same type as result
-                gold = type(result)(gold)
+            # elif type(gold) != type(result):
+            #     # cast gold to the same type as result
+            #     gold = type(result)(gold)
 
             for metric in self._metric_fn_list.keys():
                 if self.multiple_target and metric != "anls":
@@ -1521,7 +1617,7 @@ class ConfigurableTask(Task):
                         try:
                             result_score = self._metric_fn_list[metric](
                                 references=[gold_option],
-                                predictions=[result],
+                                predictions=result,
                                 **self._metric_fn_kwargs[metric],
                             )
                         except TypeError:  # TODO: this is hacky and I don't want to do it
@@ -1540,7 +1636,7 @@ class ConfigurableTask(Task):
                     try:
                         result_score = self._metric_fn_list[metric](
                             references=gold,
-                            predictions=[result],
+                            predictions=result,
                             **self._metric_fn_kwargs[metric],
                         )
                     except TypeError:  # needed for now in order to use a different interface between our own metrics and HF Evaluate metrics
@@ -1572,3 +1668,53 @@ class ConfigurableTask(Task):
 
     def __repr__(self):
         return f"ConfigurableTask(task_name={getattr(self.config, 'task', None)}," f"output_type={self.OUTPUT_TYPE}," f"num_fewshot={getattr(self.config, 'num_fewshot', None)}," f"num_samples={len(self.eval_docs)})"
+
+
+class ConfigurableMessagesTask(ConfigurableTask):
+    def __init__(self, data_dir=None, cache_dir=None, download_mode=None, config=None, model_name=None):
+        super().__init__(data_dir, cache_dir, download_mode, config, model_name)
+
+    def doc_to_messages(self, doc: dict) -> Union[int, str, list]:
+        if callable(self.config.doc_to_messages):
+            return (
+                self.config.doc_to_messages(doc, self.lmms_eval_specific_kwargs)
+                if self.lmms_eval_specific_kwargs is not None and len(inspect.signature(self.config.doc_to_messages).parameters) == 2
+                else self.config.doc_to_messages(
+                    doc,
+                )
+            )
+        elif self.config.doc_to_messages is None and (self.config.doc_to_visual is not None or self.config.doc_to_text is not None):
+            # An auto doc to messages function
+            def auto_doc_to_messages(doc):
+                visuals = self.doc_to_visual(doc)
+                if visuals is None:
+                    visuals = []
+                text = self.doc_to_text(doc)
+                messages = [{"role": "user", "content": []}]
+                content = []
+                for visual in visuals:
+                    if isinstance(visual, PIL_Image.Image):
+                        content.append({"type": "image", "url": visual})
+                    elif isinstance(visual, dict):
+                        content.append({"type": "audio", "url": visual})
+                    elif isinstance(visual, str):
+                        content.append({"type": "video", "url": visual})
+                content.append({"type": "text", "text": text})
+                messages[0]["content"] = content
+                return messages
+
+            return auto_doc_to_messages(doc)
+        else:
+            # eval_logger.warning("Note that doc_to_visual was called but not set in config. Please check if this is a text-only task.")
+            return self.config.doc_to_messages
+
+    def construct_requests(self, doc_id: int, ctx: str, **kwargs) -> Union[List[Instance], Instance]:
+        split = kwargs.get("metadata").get("split")
+        # kwargs.pop("split")
+        assert self.OUTPUT_TYPE == "generate_until", "Currently messages is used for generation only"
+
+        arguments = (ctx, self.doc_to_messages, copy.deepcopy(self.config.generation_kwargs), doc_id, self.config.task, split)
+        return Instance(request_type=self.OUTPUT_TYPE, arguments=arguments, idx=0, task_name=self.config.task, doc_id=doc_id, **kwargs)
+
+    def __repr__(self):
+        return f"ConfigurableMessagesTask(task_name={getattr(self.config, 'task', None)}," f"output_type={self.OUTPUT_TYPE}," f"num_fewshot={getattr(self.config, 'num_fewshot', None)}," f"num_samples={len(self.eval_docs)})"

@@ -5,8 +5,11 @@ import hashlib
 import json
 import os
 import unicodedata
-from typing import Any, Dict, List, Optional, Tuple, Type, TypeVar, Union
+from typing import Any, Dict, List, Optional, Tuple, Type, TypeVar
 
+import torch
+import torch.distributed as dist
+import torch.nn as nn
 from loguru import logger as eval_logger
 from sqlitedict import SqliteDict
 from tqdm import tqdm
@@ -17,12 +20,13 @@ from lmms_eval.api.instance import Instance
 T = TypeVar("T", bound="lmms")
 
 LMMS_EVAL_HOME = os.path.expanduser(os.getenv("LMMS_EVAL_HOME", "~/.cache/lmms-eval"))
-LMMS_EVAL_USE_CACHE = os.getenv("LMMS_EVAL_USE_CACHE", "False")
-# Memory optimization: limit cache dict size in memory
-LMMS_EVAL_CACHE_MEMORY_LIMIT = int(os.getenv("LMMS_EVAL_CACHE_MEMORY_LIMIT", "10000"))  # Max items per task in memory
+LMMS_EVAL_USE_CACHE = os.getenv("LMMS_EVAL_USE_CACHE", "False").lower() in ("true", "1", "yes")
+LMMS_EVAL_CACHE_CHUNK_SIZE = int(os.getenv("LMMS_EVAL_CACHE_CHUNK_SIZE", "256"))
 
 
 class lmms(abc.ABC):
+    is_simple: bool = True
+
     def __init__(self) -> None:
         """Defines the interface that should be implemented by all lmms subclasses.
         lmmss are assumed to take image-text as input and yield strings as output
@@ -36,26 +40,37 @@ class lmms(abc.ABC):
         self.cache_dict = collections.defaultdict(dict)
         self.initialized_cache_dir = False
 
-    def prepare_cache_dir(self) -> None:
+    def prepare_cache_dir(self):
         if self.initialized_cache_dir:
             return
+        # initialize cache directory for this model instance
         resolved_name = self._resolve_model_name_for_cache()
         cache_hash = self.generate_cache_folder_hash_name(resolved_name)
         self._cache_dir = os.path.join(LMMS_EVAL_HOME, "eval_cache", cache_hash)
         eval_logger.info(f"Resolved model folder for cache: {self._cache_dir}")
         self.initialized_cache_dir = True
 
-    def generate_cache_folder_hash_name(self, model_name: str) -> str:
+    def generate_cache_folder_hash_name(self, model_name: str):
+        """
+        Generate a cache hash for a model
+        """
         task_dict_keys = list(self.task_dict.keys())
         class_name = type(self).__name__
         hash_string = "|".join(task_dict_keys)
+
         text_hash = unicodedata.normalize("NFC", hash_string)
         text_hash = text_hash.replace("\r\n", "\n").replace("\r", "\n")
+
         hash_string = hashlib.sha256(text_hash.encode("utf-8")).hexdigest()
         model_name = os.path.basename(model_name)
-        return f"{class_name}_{model_name}_{hash_string}"
+        folder_name = class_name + "_" + model_name + "_" + hash_string
+        return folder_name
 
     def _resolve_model_name_for_cache(self) -> str:
+        """
+        Best-effort resolution of a human-readable model identifier for cache naming.
+        Checks common attributes; falls back to class name.
+        """
         for attr_name in ("model_name", "model_version", "model_id", "pretrained", "fps", "max_pixels", "min_pixels"):
             value = getattr(self, attr_name, None)
             if isinstance(value, str) and value:
@@ -67,102 +82,136 @@ class lmms(abc.ABC):
 
     @property
     def get_model_cache_dir(self) -> str:
+        """
+        Property returning the initialized cache directory for this model instance.
+        """
         return self._cache_dir
 
     def get_rank_and_world_size(self) -> Tuple[int, int]:
-        try:
-            import torch.distributed as dist
-
-            if dist.is_initialized():
-                return dist.get_rank(), dist.get_world_size()
-        except Exception:
-            pass
+        """
+        Get the rank and world size for the current process
+        """
+        # The rank and world size is a bit chaotic in current many ... many model implementations
+        # So we use torch.distributed to get the rank and world size here instead of self.rank and self.world_size
+        # fallback if not initialized
+        if dist.is_initialized():
+            return dist.get_rank(), dist.get_world_size()
         return self.rank, self.world_size
 
     def ensure_model_cache_dir(self) -> str:
+        """
+        Ensure the cache directory for a given model exists, and return its path.
+        """
         os.makedirs(self.get_model_cache_dir, exist_ok=True)
         return self.get_model_cache_dir
 
-    def load_cache(self) -> None:
-        if not hasattr(self, "cache_dict"):
-            self.cache_dict = collections.defaultdict(dict)
-        if not hasattr(self, "initialized_cache_dir"):
-            self.initialized_cache_dir = False
-        if LMMS_EVAL_USE_CACHE == "True":
+    def load_cache(self):
+        if LMMS_EVAL_USE_CACHE:
             self.prepare_cache_dir()
             self.cache_dict = self.load_jsonl_cache()
         else:
             self.cache_dict = collections.defaultdict(dict)
 
-    def load_jsonl_cache(self) -> Dict[str, Dict[Any, Any]]:
+    def load_jsonl_cache(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Load all .jsonl files in the model's cache directory.
+
+        Returns a dict mapping filename (base name) -> list of records.
+        Missing directory returns empty dict.
+        """
         cache_dir = self.get_model_cache_dir
         if not os.path.isdir(cache_dir):
             return collections.defaultdict(dict)
 
         rank, world_size = self.get_rank_and_world_size()
+
         files = [f"{task_name}_rank{rank}_world_size{world_size}.jsonl" for task_name in self.task_dict.keys()]
 
-        cache_data: Dict[str, Dict[Any, Any]] = collections.defaultdict(dict)
-        for task_name, fname in zip(self.task_dict.keys(), files):
-            full_path = os.path.join(cache_dir, fname)
-            records: Dict[Any, Any] = {}
-            try:
-                with open(full_path, "r", encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        try:
-                            line = json.loads(line)
-                            records[line["doc_id"]] = line["response"]
-                        except (json.JSONDecodeError, KeyError):
-                            eval_logger.warning(f"Skipping malformed JSONL line in {full_path}")
-            except FileNotFoundError:
-                continue
-            cache_data[task_name] = records.copy()
+        cache_data: Dict[str, Dict[str, Any]] = collections.defaultdict(dict)
+        try:
+            for task_name, fname in zip(self.task_dict.keys(), files):
+                full_path = os.path.join(cache_dir, fname)
+                records: Dict[str, Any] = collections.defaultdict(dict)
+                try:
+                    with open(full_path, "r", encoding="utf-8") as f:
+                        for line in f:
+                            line = line.strip()
+                            try:
+                                line = json.loads(line)
+                                # Wrap response in a list to match the expected format for process_results
+                                records[line["doc_id"]] = [line["response"]]
+                            except (json.JSONDecodeError, KeyError):
+                                eval_logger.warning(f"Skipping malformed JSONL line in {full_path}")
+                except FileNotFoundError:
+                    # If file disappears during read, skip
+                    continue
+                cache_data[task_name] = records.copy()
+        except FileNotFoundError:
+            # Directory disappeared between checks
+            return collections.defaultdict(dict)
+        except Exception as e:
+            eval_logger.error(f"Error loading cache from {full_path}: {e}")
+            return collections.defaultdict(dict)
+
         return cache_data
 
     def _extract_doc_id(self, request: Instance) -> Any:
-        if request.doc_id is not None:
-            return request.doc_id
+        """
+        TODO: Implement logic to extract `doc_id` from a request.
+        This method should return a JSON-serializable identifier (e.g., int or str).
+        """
         try:
             ctx, doc_to_messages, gen_kwargs, doc_id, task, split = request.args
-            return doc_id
         except Exception:
-            try:
-                ctx, gen_kwargs, doc_to_visual, doc_id, task, split = request.arguments
-                return doc_id
-            except Exception:
-                return None
+            contexts, gen_kwargs, doc_to_visual, doc_id, task, split = request.arguments
+        return doc_id
 
-    def _append_request_response_to_cache(self, request: Instance, response: Any, task_name: str) -> str:
+    def _append_request_response_to_cache(
+        self,
+        request: Instance,
+        response: str,
+        task_name: str,
+    ) -> str:
+        """
+        Append a single request/response record to a JSONL cache file under the
+        model's cache directory. The record format is:
+        {"doc_id": <doc_id>, "response": <response>}
+
+        Returns the full path of the file written to.
+        """
         cache_dir = self.ensure_model_cache_dir()
+
         rank, world_size = self.get_rank_and_world_size()
+
         base = f"{task_name}_rank{rank}_world_size{world_size}.jsonl"
+
         file_path = os.path.join(cache_dir, base)
 
+        # Obtain doc_id via user-implemented logic
         doc_id = self._extract_doc_id(request)
+
         record = {"doc_id": doc_id, "response": response}
-        self.cache_dict[task_name][doc_id] = response
+        self.cache_dict[task_name][doc_id] = record
         line = json.dumps(record, ensure_ascii=False)
 
+        # Append in text mode with UTF-8 encoding
         with open(file_path, "a", encoding="utf-8") as f:
             f.write(line + "\n")
 
-        # Memory optimization: limit cache dict size in memory
-        if len(self.cache_dict[task_name]) > LMMS_EVAL_CACHE_MEMORY_LIMIT:
-            # Keep only recent items in memory, older ones are on disk
-            items_to_keep = list(self.cache_dict[task_name].items())[-LMMS_EVAL_CACHE_MEMORY_LIMIT:]
-            self.cache_dict[task_name] = dict(items_to_keep)
-            gc.collect()
-            eval_logger.debug(f"Cache memory optimization: trimmed cache_dict[{task_name}] to {LMMS_EVAL_CACHE_MEMORY_LIMIT} items")
-
         return file_path
 
-    def add_request_response_to_cache(self, request: Instance, response: Any) -> None:
-        if LMMS_EVAL_USE_CACHE == "True":
+    def add_request_response_to_cache(self, request: Instance, response: str):
+        """
+        Add a request and response to the cache
+        """
+        if LMMS_EVAL_USE_CACHE:
             self._append_request_response_to_cache(request, response, request.task_name)
 
-    def get_response_from_cache(self, requests: List[Instance]) -> Tuple[List[Any], List[Instance]]:
-        if LMMS_EVAL_USE_CACHE == "False":
+    def get_response_from_cache(self, requests: List[Instance]) -> Tuple[List[str], List[Instance]]:
+        """
+        Get the response from the cache
+        """
+        if not LMMS_EVAL_USE_CACHE:
             return [], requests
         not_cached_requests = []
         responses = []
@@ -174,6 +223,119 @@ class lmms(abc.ABC):
         eval_logger.info(f"Loaded {len(responses)} responses from cache")
         eval_logger.info(f"Not cached {len(not_cached_requests)} requests")
         return responses, not_cached_requests
+
+    def _get_chunk_cache_path(self, task_name: str, chunk_idx: int) -> str:
+        """
+        Get the path for a chunk cache file.
+        Format: {cache_dir}/{task_name}_chunk_{chunk_idx}.jsonl
+        """
+        cache_dir = self.ensure_model_cache_dir()
+        rank, world_size = self.get_rank_and_world_size()
+        return os.path.join(cache_dir, f"{task_name}_chunk_{chunk_idx}_rank{rank}_world_size{world_size}.jsonl")
+
+    def _save_chunk_cache(self, task_name: str, chunk_responses: List[Tuple[str, str, Instance]], chunk_idx: int) -> None:
+        """
+        Save a chunk of responses to JSONL cache file and update SqliteDict cache.
+
+        :param task_name: Name of the task
+        :param chunk_responses: List of (doc_id, response, request) tuples
+        :param chunk_idx: Index of the chunk
+        """
+        if not LMMS_EVAL_USE_CACHE:
+            return
+
+        chunk_path = self._get_chunk_cache_path(task_name, chunk_idx)
+
+        try:
+            with open(chunk_path, "a", encoding="utf-8") as f:
+                for doc_id, response, request in chunk_responses:
+                    record = {"doc_id": doc_id, "response": response, "chunk_idx": chunk_idx}
+                    line = json.dumps(record, ensure_ascii=False)
+                    f.write(line + "\n")
+
+                    # Also update SqliteDict cache
+                    self.cache_dict[task_name][doc_id] = response
+                    # Add to request-level cache if using CachingLMM and request is not None
+                    if request is not None:
+                        self.add_request_response_to_cache(request, response)
+
+            eval_logger.debug(f"Saved chunk {chunk_idx} with {len(chunk_responses)} responses to {chunk_path}")
+        except Exception as e:
+            eval_logger.error(f"Error saving chunk cache to {chunk_path}: {e}")
+
+    def _load_chunk_cache(self, task_name: str, chunk_idx: int) -> Dict[str, str]:
+        """
+        Load a chunk of cached responses from JSONL file.
+
+        :param task_name: Name of the task
+        :param chunk_idx: Index of the chunk
+        :return: Dictionary mapping doc_id to response
+        """
+        chunk_path = self._get_chunk_cache_path(task_name, chunk_idx)
+
+        if not os.path.exists(chunk_path):
+            return {}
+
+        cache_data = {}
+        try:
+            with open(chunk_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                        cache_data[record["doc_id"]] = record["response"]
+                    except (json.JSONDecodeError, KeyError):
+                        eval_logger.warning(f"Skipping malformed JSONL line in {chunk_path}")
+        except Exception as e:
+            eval_logger.error(f"Error loading chunk cache from {chunk_path}: {e}")
+
+        return cache_data
+
+    def _get_cached_responses_for_requests(
+        self, requests: List[Instance], task_name: str
+    ) -> Tuple[List[Optional[str]], List[Instance], List[int]]:
+        """
+        Get cached responses for requests, supporting mixed mode (some cached, some not).
+
+        :param requests: List of Instance objects
+        :param task_name: Name of the task
+        :return: Tuple of (cached_responses_list, uncached_requests_list, uncached_indices)
+                 - cached_responses_list: List with cached responses or None for uncached
+                 - uncached_requests_list: List of uncached Instance objects
+                 - uncached_indices: Original indices of uncached requests
+        """
+        if not LMMS_EVAL_USE_CACHE:
+            return [None] * len(requests), requests, list(range(len(requests)))
+
+        cached_responses = [None] * len(requests)
+        uncached_requests = []
+        uncached_indices = []
+
+        for idx, request in enumerate(requests):
+            doc_id = request.doc_id
+
+            # Check if in memory cache (from previous chunks)
+            if doc_id in self.cache_dict.get(task_name, {}):
+                cached_responses[idx] = self.cache_dict[task_name][doc_id]
+            else:
+                # Check chunk cache files
+                chunk_idx = idx // LMMS_EVAL_CACHE_CHUNK_SIZE
+                chunk_cache = self._load_chunk_cache(task_name, chunk_idx)
+
+                if doc_id in chunk_cache:
+                    cached_responses[idx] = chunk_cache[doc_id]
+                    # Update memory cache
+                    self.cache_dict[task_name][doc_id] = chunk_cache[doc_id]
+                else:
+                    uncached_requests.append(request)
+                    uncached_indices.append(idx)
+
+        cached_count = sum(1 for r in cached_responses if r is not None)
+        eval_logger.info(f"Loaded {cached_count} responses from chunk cache for task {task_name}")
+
+        return cached_responses, uncached_requests, uncached_indices
 
     @abc.abstractmethod
     def loglikelihood(self, requests: List[Instance]) -> List[Tuple[float, bool]]:
@@ -274,6 +436,14 @@ class lmms(abc.ABC):
 
     def set_cache_hook(self, cache_hook) -> None:
         self.cache_hook = cache_hook
+
+    def clean(self):
+        for attr_name in list(vars(self)):
+            attr_value = getattr(self, attr_name)
+            if isinstance(attr_value, nn.Module):
+                delattr(self, attr_name)
+        gc.collect()
+        torch.cuda.empty_cache()
 
 
 ### SQLite-based caching of LMM responses

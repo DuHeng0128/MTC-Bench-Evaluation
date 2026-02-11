@@ -19,7 +19,7 @@ with open(Path(__file__).parent / "mmbench.yaml", "r") as f:
 
     config = yaml.safe_load("".join(safe_data))
 
-GPT_EVAL_MODEL_NAME = config["metadata"]["gpt_eval_model_name"]
+GPT_EVAL_MODEL_NAME = os.getenv("MODEL_VERSION", "gpt-4o-2024-11-20")
 API_TYPE = os.getenv("API_TYPE", "openai")
 
 if API_TYPE == "openai":
@@ -100,7 +100,7 @@ def mmbench_process_results(doc, results):
 
 
 def mmbench_aggregate_dev_results_eval(results, args):
-    print(f"============= MMBench-CN(Dev) Detailed Results =============")
+    print("============= MMBench-CN(Dev) Detailed Results =============")
     overall_acc, category_acc, l2_category_acc = mmbench_evaluator.eval_result(results, eval_method="openai")
     file = generate_submission_file("mmbench_cn_dev_results.json", args)
     details_info = {
