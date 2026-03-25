@@ -13,15 +13,12 @@ The codebase is adapted from **EffiVLM-Bench** and follows the same high-level i
 - `mtcbench_video`
 
 ### Supported VLMs
-| Model | `--model` arg |
-|---|---|
-| Qwen2-VL | `qwen2_vl_with_kvcache` |
-| Qwen2.5-VL | `qwen2_5_vl_with_kvcache` |
-| Qwen3-VL | `qwen3_vl_with_kvcache` |
-| LLaVA-OneVision | `llava_onevision_with_kvcache` |
-| LLaVA-OneVision 1.5 | `llava_onevision1_5_with_kvcache` |
-| InternVL2.5 | `internvl2_with_kvcache` |
-| InternVL3 | `internvl3_with_kvcache` |
+- `Qwen2-VL`
+- `Qwen2.5-VL`
+- `LLaVA-OneVision`
+- `LLaVA-OneVision 1.5`
+- `InternVL2.5`
+- `InternVL3`
 
 ### Supported token compression methods
 - `fastv`
@@ -173,6 +170,17 @@ lmms-eval \
   --output_path ./results/mtcbench_qwen2_vl_visionzip_b0.4
 ```
 
+### DART (example)
+```bash
+lmms-eval \
+  --model qwen2_vl \
+  --model_args 'pretrained="Qwen/Qwen2-VL-7B-Instruct",method=dart,budgets=0.4,use_flash_attention_2=true' \
+  --tasks mtcbench_image \
+  --batch_size 1 \
+  --device cuda:0 \
+  --output_path ./results/mtcbench_qwen2_vl_dart_b0.4
+```
+
 ### PruMerge+ (example)
 Because `+` can be interpreted by shells in some contexts, it is safest to quote the value:
 
@@ -208,6 +216,8 @@ Open `run_example.sh` and set the following:
 | `TASKS` | List of tasks, e.g. `("mtcbench_image")` or `("mtcbench_video")` | optional |
 | `BUDGETS` | Keep-ratio list, e.g. `(0.4)` or `(0.25 0.5)` | optional |
 | `OPENAI_API_KEY` / `OPENAI_API_URL` | Required only for tasks with GPT-based evaluation | optional |
+| `--log_samples` | Save per-sample model outputs to the output directory | optional |
+| `--reuse_responses` | Load cached model responses from a previous run to skip re-inference | optional |
 
 > **Security note**: Do not commit real API keys. Set them via local shell exports or a `.env` file instead.
 
@@ -242,6 +252,11 @@ METHODS=(
     "visionzip visionzip use_flash_attention_2=true"
     "prumerge+ prumerge+ use_flash_attention_2=true"
     "dart      dart      use_flash_attention_2=true"
+    # "h2o        head      head_adaptive=True,use_flash_attention_2=true"
+    # "snapkv     head      head_adaptive=True,pooling=avgpool,use_flash_attention_2=true"
+    # "pyramidkv  head      head_adaptive=True,pooling=avgpool,use_flash_attention_2=true"
+    # "look-m     merge     merge=True,use_flash_attention_2=true"
+    # "streamingllm streamingllm use_flash_attention_2=true"
 
     # Token pruning — InternVL2.5-38B (multi-GPU model parallel)
     # "fastv     fastv     device_map=auto"
@@ -249,12 +264,9 @@ METHODS=(
     # "prumerge+ prumerge+ device_map=auto"
 
     # KV cache methods — LLaVA-OneVision
-    # "h2o        head       head_adaptive=True"
-    # "snapkv     head       head_adaptive=True,pooling=avgpool"
-    # "pyramidkv  head       head_adaptive=True,pooling=avgpool"
-    # "look-m     merge      merge=True"
-    # "vl-cache   head_layer vlcache_head_adaptive=True,layer_adaptive=True"
-    # "streamingllm streamingllm"
+    # "fastv     fastv"
+    # "visionzip visionzip"
+    # "prumerge+ prumerge+"
 )
 ```
 
