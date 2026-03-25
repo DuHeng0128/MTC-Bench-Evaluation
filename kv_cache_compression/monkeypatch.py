@@ -52,7 +52,7 @@ from .internvl2_5_model import (
     internvl_attention_forward_38B_prumerge_plus,
     internvl_naive_attn_38B_prumerge_plus,
 )
-import types 
+import types
 
 from .kv_cache_utils import VlCacheKVCluster
 from .siglip_model import *
@@ -69,6 +69,24 @@ from .qwen2vl_model import (
     qwen2vl_vision_block_forward_prumerge_plus,
     qwen2vl_generation_forward_prumerge_plus,
     qwen_flash_attention_forward_look_m,
+    qwen_vl_flash_attention_forward_dart,
+    qwen_vl_model_forward_dart,
+)
+from .qwen2_5vl_model import (
+    qwen2_5vl_flash_attention_forward_fastv,
+    qwen2_5vl_text_model_forward_fastv,
+    qwen2_5vl_generation_forward_fastv,
+    qwen2_5vl_vision_attention_forward_visionzip,
+    qwen2_5vl_vision_block_forward_visionzip,
+    qwen2_5vl_vision_tower_forward_visionzip,
+    qwen2_5vl_generation_forward_visionzip,
+    qwen2_5vl_vision_attention_forward_prumerge_plus,
+    qwen2_5vl_vision_block_forward_prumerge_plus,
+    qwen2_5vl_vision_tower_forward_prumerge_plus,
+    qwen2_5vl_generation_forward_prumerge_plus,
+    qwen2_5vl_flash_attention_forward_dart,
+    qwen2_5vl_text_model_forward_dart,
+    qwen2_5vl_generation_forward_dart,
 )
 
 
@@ -200,6 +218,21 @@ def replace_qwen(args, model, method):
         LlavaQwenSparseForCausalLM.scale = 13.5
         Qwen2SparseModel.ratio = getattr(args, 'r', 1.0)
 
+    elif method == 'dart':
+        print('using dart')
+        from .qwen_model import qwen_attention_forward_dart, qwen_model_forward_dart
+        target_layer_idx = int(getattr(args, 'target_layer_idx', 2))
+        for name, module in model.named_modules():
+            if isinstance(module, Qwen2Attention):
+                module.forward = types.MethodType(qwen_attention_forward_dart, module)
+                module.target_layer_idx = target_layer_idx
+            if isinstance(module, Qwen2Model):
+                module.forward = types.MethodType(qwen_model_forward_dart, module)
+                module.target_layer_idx = target_layer_idx
+                module.budgets = float(getattr(args, 'budgets', 1.0))
+                module.pivot_image_token = int(getattr(args, 'pivot_image_token', 4))
+                module.pivot_text_token = int(getattr(args, 'pivot_text_token', 4))
+
 
 def replace_qwen2vl(args, model, method):
 
@@ -303,6 +336,22 @@ def replace_qwen2vl(args, model, method):
         qwen2vl.modeling_qwen2_vl.Qwen2VLVisionBlock.forward = qwen2vl_vision_block_forward_prumerge_plus
         qwen2vl.modeling_qwen2_vl.Qwen2VisionTransformerPretrainedModel.budgets = getattr(args, 'budgets', 1.0)
         qwen2vl.modeling_qwen2_vl.Qwen2VLForConditionalGeneration.forward = qwen2vl_generation_forward_prumerge_plus
+
+    elif method == 'dart':
+        print('using dart')
+        from qwen2vl.modeling_qwen2_vl import Qwen2VLFlashAttention2 as Qwen2VLFlashAttention2_cls
+        from qwen2vl.modeling_qwen2_vl import Qwen2VLModel as Qwen2VLModel_cls
+        target_layer_idx = int(getattr(args, 'target_layer_idx', 2))
+        for name, module in model.named_modules():
+            if isinstance(module, Qwen2VLFlashAttention2_cls):
+                module.forward = types.MethodType(qwen_vl_flash_attention_forward_dart, module)
+                module.target_layer_idx = target_layer_idx
+            if isinstance(module, Qwen2VLModel_cls):
+                module.forward = types.MethodType(qwen_vl_model_forward_dart, module)
+                module.target_layer_idx = target_layer_idx
+                module.budgets = float(getattr(args, 'budgets', 1.0))
+                module.pivot_image_token = int(getattr(args, 'pivot_image_token', 4))
+                module.pivot_text_token = int(getattr(args, 'pivot_text_token', 4))
 
 def replace_internvl2_5(args, model, method):
 
@@ -531,11 +580,419 @@ def replace_qwen_for_internvl_38B(args, model, method):
         model.extract_feature = types.MethodType(internvl_extract_feature_38B_prumerge_plus, model)
         model.budgets = getattr(args, 'budgets', 1.0)
 
+def replace_qwen2_5vl(args, model, method):
+    from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLAttention
+
+    if method == 'streamingllm':
+        print('using streamingllm')
+        for name, module in model.named_modules():
+            if isinstance(module, Qwen2_5_VLAttention):
+                module.forward = types.MethodType(qwen_flash_attention_forward_streamingLLM, module)
+                module.budgets = args.budgets
+
+    elif method == 'h2o':
+        print('using h2o')
+        for name, module in model.named_modules():
+            if isinstance(module, Qwen2_5_VLAttention):
+                module.forward = types.MethodType(qwen_flash_attention_forward_H2O, module)
+                module.budgets = args.budgets
+                module.h2o_head_adaptive = args.h2o_head_adaptive
+
+    elif method == 'snapkv':
+        print('using snapkv')
+        for name, module in model.named_modules():
+            if isinstance(module, Qwen2_5_VLAttention):
+                module.forward = types.MethodType(qwen_flash_attention_forward_snapkv, module)
+                module.budgets = args.budgets
+                module.snapkv_head_adaptive = args.snapkv_head_adaptive
+                module.pooling = args.pooling
+
+    elif method == 'pyramidkv':
+        print('using pyramidkv')
+        for name, module in model.named_modules():
+            if isinstance(module, Qwen2_5_VLAttention):
+                module.forward = types.MethodType(qwen_flash_attention_forward_PyramidKV, module)
+                module.budgets = args.budgets
+                module.pyramidkv_head_adaptive = args.pyramidkv_head_adaptive
+                module.pooling = args.pooling
+
+    elif method == 'random':
+        print('using random')
+        for name, module in model.named_modules():
+            if isinstance(module, Qwen2_5_VLAttention):
+                module.forward = types.MethodType(qwen_flash_attention_forward_random, module)
+                module.budgets = getattr(args, 'budgets', 1.0)
+
+    elif method == 'look-m':
+        print('using look-m')
+        for name, module in model.named_modules():
+            if isinstance(module, Qwen2_5_VLAttention):
+                module.forward = types.MethodType(qwen_flash_attention_forward_look_m, module)
+                module.budget = getattr(args, 'budgets', 1.0)
+                module.merge = getattr(args, 'merge', True)
+                module.hh_ratio = getattr(args, 'hh_ratio', None)
+                module.recent_ratio = getattr(args, 'recent_ratio', None)
+
+    elif method == 'vl-cache':
+        print('using vlcache')
+        from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLModel
+        for name, module in model.named_modules():
+            if isinstance(module, Qwen2_5_VLAttention):
+                module.forward = types.MethodType(qwen_flash_attention_forward_vlcache, module)
+                module.vlcache_alpha_sparsity = getattr(args, 'budgets', 1.0)
+                module.vlcache_different_window_per_layer = getattr(args, 'vlcache_different_window_per_layer', False)
+                module.vlcache_head_adaptive = getattr(args, 'head_adaptive', False)
+                module.vlcache_budget_layer_adaptive = getattr(args, 'layer_adaptive', True)
+            if isinstance(module, Qwen2_5_VLModel):
+                module.forward = types.MethodType(qwen2vl_model_forward_vlcache, module)
+
+    elif method == 'fastv':
+        print('using fastv')
+        from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
+            Qwen2_5_VLTextModel, Qwen2_5_VLForConditionalGeneration,
+        )
+        target_layer_idx = getattr(args, 'target_layer_idx', 2)
+        for name, module in model.named_modules():
+            if isinstance(module, Qwen2_5_VLAttention):
+                module.forward = types.MethodType(qwen2_5vl_flash_attention_forward_fastv, module)
+                module.target_layer_idx = target_layer_idx
+            if isinstance(module, Qwen2_5_VLTextModel):
+                module.forward = types.MethodType(qwen2_5vl_text_model_forward_fastv, module)
+                module.target_layer_idx = target_layer_idx
+                module.budgets = getattr(args, 'budgets', 1.0)
+                module.origin = getattr(args, 'origin', False)
+        import transformers.models.qwen2_5_vl.modeling_qwen2_5_vl as q25vl
+        q25vl.Qwen2_5_VLForConditionalGeneration.forward = qwen2_5vl_generation_forward_fastv
+
+    elif method == 'visionzip':
+        print('using visionzip')
+        import transformers.models.qwen2_5_vl.modeling_qwen2_5_vl as q25vl
+        n_blocks = len(model.visual.blocks)
+        # Use the last fullatt block for scoring; windowed-attention blocks give poor global scores
+        fullatt_indexes = getattr(model.visual, 'fullatt_block_indexes', None)
+        target_block_idx = fullatt_indexes[-1] if fullatt_indexes else n_blocks - 2
+        for idx, blk in enumerate(model.visual.blocks):
+            blk.attn.layer_idx = idx
+            blk.attn.target_layer_idx = target_block_idx
+            blk.attn.forward = types.MethodType(qwen2_5vl_vision_attention_forward_visionzip, blk.attn)
+            blk.forward = types.MethodType(qwen2_5vl_vision_block_forward_visionzip, blk)
+        q25vl.Qwen2_5_VisionTransformerPretrainedModel.forward = qwen2_5vl_vision_tower_forward_visionzip
+        q25vl.Qwen2_5_VisionTransformerPretrainedModel.budgets = getattr(args, 'budgets', 1.0)
+        q25vl.Qwen2_5_VLForConditionalGeneration.forward = qwen2_5vl_generation_forward_visionzip
+
+    elif method == 'prumerge+':
+        print('using prumerge+')
+        import transformers.models.qwen2_5_vl.modeling_qwen2_5_vl as q25vl
+        n_blocks = len(model.visual.blocks)
+        fullatt_indexes = getattr(model.visual, 'fullatt_block_indexes', None)
+        target_block_idx = fullatt_indexes[-1] if fullatt_indexes else n_blocks - 2
+        for idx, blk in enumerate(model.visual.blocks):
+            blk.attn.layer_idx = idx
+            blk.attn.target_layer_idx = target_block_idx
+            blk.attn.forward = types.MethodType(qwen2_5vl_vision_attention_forward_prumerge_plus, blk.attn)
+            blk.forward = types.MethodType(qwen2_5vl_vision_block_forward_prumerge_plus, blk)
+        q25vl.Qwen2_5_VisionTransformerPretrainedModel.forward = qwen2_5vl_vision_tower_forward_prumerge_plus
+        q25vl.Qwen2_5_VisionTransformerPretrainedModel.budgets = getattr(args, 'budgets', 1.0)
+        q25vl.Qwen2_5_VLForConditionalGeneration.forward = qwen2_5vl_generation_forward_prumerge_plus
+
+    elif method == 'dart':
+        print('using dart')
+        from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
+            Qwen2_5_VLTextModel, Qwen2_5_VLForConditionalGeneration,
+        )
+        import transformers.models.qwen2_5_vl.modeling_qwen2_5_vl as q25vl
+        target_layer_idx = int(getattr(args, 'target_layer_idx', 2))
+        for name, module in model.named_modules():
+            if isinstance(module, Qwen2_5_VLAttention):
+                module.forward = types.MethodType(qwen2_5vl_flash_attention_forward_dart, module)
+                module.target_layer_idx = target_layer_idx
+            if isinstance(module, Qwen2_5_VLTextModel):
+                module.forward = types.MethodType(qwen2_5vl_text_model_forward_dart, module)
+                module.target_layer_idx = target_layer_idx
+                module.budgets = float(getattr(args, 'budgets', 1.0))
+                module.pivot_image_token = int(getattr(args, 'pivot_image_token', 4))
+                module.pivot_text_token = int(getattr(args, 'pivot_text_token', 4))
+        q25vl.Qwen2_5_VLForConditionalGeneration.forward = qwen2_5vl_generation_forward_dart
+
+    else:
+        raise ValueError(f"Unknown method '{method}' for replace_qwen2_5vl")
+
+
+def replace_qwen3vl(args, model, method):
+    try:
+        from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextAttention
+    except ImportError:
+        raise ImportError(
+            "Qwen3VL is not available in the current transformers version. "
+            "Please upgrade transformers to a version that includes Qwen3VL support."
+        )
+
+    if method == 'streamingllm':
+        print('using streamingllm')
+        for name, module in model.named_modules():
+            if isinstance(module, Qwen3VLTextAttention):
+                module.forward = types.MethodType(qwen_flash_attention_forward_streamingLLM, module)
+                module.budgets = args.budgets
+
+    elif method == 'h2o':
+        print('using h2o')
+        for name, module in model.named_modules():
+            if isinstance(module, Qwen3VLTextAttention):
+                module.forward = types.MethodType(qwen_flash_attention_forward_H2O, module)
+                module.budgets = args.budgets
+                module.h2o_head_adaptive = args.h2o_head_adaptive
+
+    elif method == 'snapkv':
+        print('using snapkv')
+        for name, module in model.named_modules():
+            if isinstance(module, Qwen3VLTextAttention):
+                module.forward = types.MethodType(qwen_flash_attention_forward_snapkv, module)
+                module.budgets = args.budgets
+                module.snapkv_head_adaptive = args.snapkv_head_adaptive
+                module.pooling = args.pooling
+
+    elif method == 'pyramidkv':
+        print('using pyramidkv')
+        for name, module in model.named_modules():
+            if isinstance(module, Qwen3VLTextAttention):
+                module.forward = types.MethodType(qwen_flash_attention_forward_PyramidKV, module)
+                module.budgets = args.budgets
+                module.pyramidkv_head_adaptive = args.pyramidkv_head_adaptive
+                module.pooling = args.pooling
+
+    elif method == 'random':
+        print('using random')
+        for name, module in model.named_modules():
+            if isinstance(module, Qwen3VLTextAttention):
+                module.forward = types.MethodType(qwen_flash_attention_forward_random, module)
+                module.budgets = getattr(args, 'budgets', 1.0)
+
+    elif method == 'look-m':
+        print('using look-m')
+        for name, module in model.named_modules():
+            if isinstance(module, Qwen3VLTextAttention):
+                module.forward = types.MethodType(qwen_flash_attention_forward_look_m, module)
+                module.budget = getattr(args, 'budgets', 1.0)
+                module.merge = getattr(args, 'merge', True)
+                module.hh_ratio = getattr(args, 'hh_ratio', None)
+                module.recent_ratio = getattr(args, 'recent_ratio', None)
+
+    elif method == 'vl-cache':
+        print('using vlcache')
+        try:
+            from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLModel
+        except ImportError:
+            raise ImportError("Qwen3VLModel not found in current transformers version.")
+        for name, module in model.named_modules():
+            if isinstance(module, Qwen3VLTextAttention):
+                module.forward = types.MethodType(qwen_flash_attention_forward_vlcache, module)
+                module.vlcache_alpha_sparsity = getattr(args, 'budgets', 1.0)
+                module.vlcache_different_window_per_layer = getattr(args, 'vlcache_different_window_per_layer', False)
+                module.vlcache_head_adaptive = getattr(args, 'head_adaptive', False)
+                module.vlcache_budget_layer_adaptive = getattr(args, 'layer_adaptive', True)
+            if isinstance(module, Qwen3VLModel):
+                module.forward = types.MethodType(qwen2vl_model_forward_vlcache, module)
+
+    elif method == 'fastv':
+        print('using fastv')
+        try:
+            from transformers.models.qwen3_vl.modeling_qwen3_vl import (
+                Qwen3VLTextModel, Qwen3VLForConditionalGeneration,
+            )
+        except ImportError:
+            raise ImportError("Qwen3VL text model classes not found; upgrade transformers.")
+        target_layer_idx = getattr(args, 'target_layer_idx', 2)
+        for name, module in model.named_modules():
+            if isinstance(module, Qwen3VLTextAttention):
+                module.forward = types.MethodType(qwen2_5vl_flash_attention_forward_fastv, module)
+                module.target_layer_idx = target_layer_idx
+            if isinstance(module, Qwen3VLTextModel):
+                module.forward = types.MethodType(qwen2_5vl_text_model_forward_fastv, module)
+                module.target_layer_idx = target_layer_idx
+                module.budgets = getattr(args, 'budgets', 1.0)
+                module.origin = getattr(args, 'origin', False)
+        try:
+            import transformers.models.qwen3_vl.modeling_qwen3_vl as q3vl
+            q3vl.Qwen3VLForConditionalGeneration.forward = qwen2_5vl_generation_forward_fastv
+        except ImportError:
+            raise ImportError("Qwen3VL ForConditionalGeneration not found; upgrade transformers.")
+
+    elif method == 'visionzip':
+        print('using visionzip')
+        try:
+            import transformers.models.qwen3_vl.modeling_qwen3_vl as q3vl
+        except ImportError:
+            raise ImportError("Qwen3VL module not found; upgrade transformers.")
+        n_blocks = len(model.visual.blocks)
+        fullatt_indexes = getattr(model.visual, 'fullatt_block_indexes', None)
+        target_block_idx = fullatt_indexes[-1] if fullatt_indexes else n_blocks - 2
+        for idx, blk in enumerate(model.visual.blocks):
+            blk.attn.layer_idx = idx
+            blk.attn.target_layer_idx = target_block_idx
+            blk.attn.forward = types.MethodType(qwen2_5vl_vision_attention_forward_visionzip, blk.attn)
+            blk.forward = types.MethodType(qwen2_5vl_vision_block_forward_visionzip, blk)
+        q3vl.Qwen3VLVisionModel.forward = qwen2_5vl_vision_tower_forward_visionzip
+        q3vl.Qwen3VLVisionModel.budgets = getattr(args, 'budgets', 1.0)
+        q3vl.Qwen3VLForConditionalGeneration.forward = qwen2_5vl_generation_forward_visionzip
+
+    elif method == 'prumerge+':
+        print('using prumerge+')
+        try:
+            import transformers.models.qwen3_vl.modeling_qwen3_vl as q3vl
+        except ImportError:
+            raise ImportError("Qwen3VL module not found; upgrade transformers.")
+        n_blocks = len(model.visual.blocks)
+        fullatt_indexes = getattr(model.visual, 'fullatt_block_indexes', None)
+        target_block_idx = fullatt_indexes[-1] if fullatt_indexes else n_blocks - 2
+        for idx, blk in enumerate(model.visual.blocks):
+            blk.attn.layer_idx = idx
+            blk.attn.target_layer_idx = target_block_idx
+            blk.attn.forward = types.MethodType(qwen2_5vl_vision_attention_forward_prumerge_plus, blk.attn)
+            blk.forward = types.MethodType(qwen2_5vl_vision_block_forward_prumerge_plus, blk)
+        q3vl.Qwen3VLVisionModel.forward = qwen2_5vl_vision_tower_forward_prumerge_plus
+        q3vl.Qwen3VLVisionModel.budgets = getattr(args, 'budgets', 1.0)
+        q3vl.Qwen3VLForConditionalGeneration.forward = qwen2_5vl_generation_forward_prumerge_plus
+
+    else:
+        raise ValueError(f"Unknown method '{method}' for replace_qwen3vl")
+
+
 def replace_mistral(method):
     pass
 
 
 def replace_llama(method):
     pass
+
+
+def replace_internvl3(args, model, method):
+    """
+    InternVL3 uses InternViT vision encoder + Qwen2.5 LLM backbone.
+    Vision patches: reuse InternVL2.5-4B visionzip/prumerge+ functions (same InternViT).
+    Text patches: use Qwen2.5-VL text attention functions.
+    FastV patches: use Qwen2.5-VL fastv functions on the Qwen2 text attention.
+    """
+    # Find the trust_remote_code module for this model
+    model_key = None
+    for key in sys.modules:
+        if 'InternVL3' in key and 'modeling_internvl_chat' in key:
+            model_key = key
+            break
+
+    if model_key:
+        model.generate = types.MethodType(internvl_generate_with_mask, model)
+
+    if method in ('streamingllm', 'h2o', 'snapkv', 'pyramidkv', 'random', 'look-m', 'vl-cache', 'fastv'):
+        # InternVL3 uses Qwen2 or Qwen2.5 as LLM; try Qwen2Attention first, then Qwen2_5_VLAttention
+        # Determine which attention class is present
+        from transformers.models.qwen2.modeling_qwen2 import Qwen2Attention as _Qwen2Attn
+        try:
+            from transformers.models.qwen2_5.modeling_qwen2_5 import Qwen2_5Attention as _Qwen25Attn
+            _has_qwen25 = True
+        except ImportError:
+            _has_qwen25 = False
+
+        # Check if model uses Qwen2 or Qwen2.5 attention by inspecting modules
+        _attn_class = None
+        for _name, _mod in model.named_modules():
+            if isinstance(_mod, _Qwen2Attn):
+                _attn_class = _Qwen2Attn
+                break
+            if _has_qwen25 and isinstance(_mod, _Qwen25Attn):
+                _attn_class = _Qwen25Attn
+                break
+
+        if method == 'streamingllm':
+            print('using streamingllm')
+            for name, module in model.named_modules():
+                if _attn_class and isinstance(module, _attn_class):
+                    module.forward = types.MethodType(qwen_attention_forward_streamingLLM, module)
+                    module.budgets = args.budgets
+        elif method == 'h2o':
+            print('using h2o')
+            for name, module in model.named_modules():
+                if _attn_class and isinstance(module, _attn_class):
+                    module.forward = types.MethodType(qwen_attention_forward_H2O, module)
+                    module.budgets = args.budgets
+                    module.h2o_head_adaptive = args.h2o_head_adaptive
+        elif method == 'snapkv':
+            print('using snapkv')
+            for name, module in model.named_modules():
+                if _attn_class and isinstance(module, _attn_class):
+                    module.forward = types.MethodType(qwen_attention_forward_snapkv, module)
+                    module.budgets = args.budgets
+                    module.snapkv_head_adaptive = args.snapkv_head_adaptive
+                    module.pooling = args.pooling
+        elif method == 'pyramidkv':
+            print('using pyramidkv')
+            for name, module in model.named_modules():
+                if _attn_class and isinstance(module, _attn_class):
+                    module.forward = types.MethodType(qwen_attn_forward_PyramidKV, module)
+                    module.budgets = args.budgets
+                    module.pyramidkv_head_adaptive = args.pyramidkv_head_adaptive
+                    module.pooling = args.pooling
+        elif method == 'random':
+            print('using random')
+            for name, module in model.named_modules():
+                if _attn_class and isinstance(module, _attn_class):
+                    module.forward = types.MethodType(qwen_attention_forward_random, module)
+                    module.budgets = getattr(args, 'budgets', 1.0)
+        elif method == 'look-m':
+            print('using look-m')
+            for name, module in model.named_modules():
+                if _attn_class and isinstance(module, _attn_class):
+                    module.forward = types.MethodType(qwen_attention_forward_LOOK_M, module)
+                    module.hh_ratio = getattr(args, 'hh_ratio', None)
+                    module.recent_ratio = getattr(args, 'recent_ratio', None)
+                    module.budget = getattr(args, 'budgets', 1.0)
+                    module.merge = getattr(args, 'merge', True)
+        elif method == 'vl-cache':
+            print('using vlcache')
+            from transformers.models.qwen2.modeling_qwen2 import Qwen2Model as _Q2Model
+            for name, module in model.named_modules():
+                if _attn_class and isinstance(module, _attn_class):
+                    module.forward = types.MethodType(qwen_attention_forward_vlcache, module)
+                    module.vlcache_alpha_sparsity = getattr(args, 'budgets', 1.0)
+                    module.vlcache_different_window_per_layer = getattr(args, 'vlcache_different_window_per_layer', False)
+                    module.vlcache_head_adaptive = getattr(args, 'head_adaptive', False)
+                    module.vlcache_budget_layer_adaptive = getattr(args, 'layer_adaptive', True)
+                if isinstance(module, _Q2Model):
+                    module.forward = types.MethodType(qwen_model_forward_vlcache, module)
+        elif method == 'fastv':
+            print('using fastv')
+            from transformers.models.qwen2.modeling_qwen2 import Qwen2Model as _Q2Model
+            target_layer_idx = getattr(args, 'target_layer_idx', 2)
+            for name, module in model.named_modules():
+                if _attn_class and isinstance(module, _attn_class):
+                    module.forward = types.MethodType(qwen_attention_forward_fastv, module)
+                    module.target_layer_idx = target_layer_idx
+                if isinstance(module, _Q2Model):
+                    module.forward = types.MethodType(qwen_model_forward_fastv, module)
+                    module.target_layer_idx = target_layer_idx
+                    module.budgets = getattr(args, 'budgets', 1.0)
+                    module.origin = getattr(args, 'origin', False)
+
+    elif method == 'visionzip':
+        print('using visionzip')
+        for idx, layer in enumerate(model.vision_model.encoder.layers):
+            layer.attn.layer_idx = idx
+            layer.attn.forward = types.MethodType(internvl_attention_forward_4B_visionzip, layer.attn)
+            layer.attn._naive_attn = types.MethodType(internvl_naive_attn_4B_visionzip, layer.attn)
+        model.generate = types.MethodType(internvl_generate_4B_visionzip, model)
+        model.extract_feature = types.MethodType(internvl_extract_feature_4B_visionzip, model)
+        model.budgets = getattr(args, 'budgets', 1.0)
+
+    elif method == 'prumerge+':
+        print('using prumerge+')
+        for idx, layer in enumerate(model.vision_model.encoder.layers):
+            layer.attn.layer_idx = idx
+            layer.attn.forward = types.MethodType(internvl_attention_forward_4B_prumerge_plus, layer.attn)
+            layer.attn._naive_attn = types.MethodType(internvl_naive_attn_4B_prumerge_plus, layer.attn)
+        model.generate = types.MethodType(internvl_generate_4B_prumerge_plus, model)
+        model.extract_feature = types.MethodType(internvl_extract_feature_4B_prumerge_plus, model)
+        model.budgets = getattr(args, 'budgets', None)
+
+    else:
+        raise ValueError(f"Unknown method '{method}' for replace_internvl3")
 
     

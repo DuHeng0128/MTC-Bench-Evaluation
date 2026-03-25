@@ -1,0 +1,28 @@
+dataset_path: /root/data2/lisida/MTC-Bench-Data/video/Specific_Capabilities/Fine_grained_Vision_Coverage/MotionBench
+dataset_kwargs:
+  token: True
+  local_files_only: True
+  verification_mode: "no_checks"
+  data_files:
+    test: "video_info.jsonl"
+metadata:
+  version: 0.0.1
+task: "motionbench_test_mtcbench"
+test_split: test
+group: mtcbench_video
+output_type: generate_until
+
+doc_to_visual: !function utils.motionbench_doc_to_visual
+doc_to_text: !function utils.motionbench_doc_to_text
+doc_to_target: !function utils.motionbench_doc_to_target
+process_results: !function utils.motionbench_process_results
+
+metric_list:
+  - metric: accuracy
+    aggregation: !function utils.accuracy_aggregate_results
+    higher_is_better: true
+
+lmms_eval_specific_kwargs:
+  default:
+    pre_prompt: ""
+    post_prompt: "\nAnswer with the option letter only."

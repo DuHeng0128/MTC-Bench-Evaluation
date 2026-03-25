@@ -1,0 +1,37 @@
+dataset_path: /root/data2/lisida/MTC-Bench-Data/video/Specific_Capabilities/Holistic_Vision_Coverage/ActivityNet_Captions
+dataset_kwargs:
+  token: True
+  local_files_only: True
+  verification_mode: "no_checks"
+  data_files:
+    test: "activitynet_captions.json"
+metadata:
+  version: 0.0.1
+task: "activitynet_captions_test_mtcbench"
+test_split: test
+group: mtcbench_video
+output_type: generate_until
+
+doc_to_visual: !function utils.activitynet_captions_doc_to_visual
+doc_to_text: !function utils.activitynet_captions_doc_to_text
+doc_to_target: !function utils.activitynet_captions_doc_to_target
+process_results: !function utils.activitynet_captions_process_results
+
+metric_list:
+  - metric: bleu4
+    aggregation: !function utils.activitynet_captions_aggregate_bleu4
+    higher_is_better: true
+  - metric: meteor
+    aggregation: !function utils.activitynet_captions_aggregate_meteor
+    higher_is_better: true
+  - metric: rouge_l
+    aggregation: !function utils.activitynet_captions_aggregate_rouge_l
+    higher_is_better: true
+  - metric: cider
+    aggregation: !function utils.activitynet_captions_aggregate_cider
+    higher_is_better: true
+
+lmms_eval_specific_kwargs:
+  default:
+    pre_prompt: ""
+    post_prompt: "\nDescribe the video in detail."

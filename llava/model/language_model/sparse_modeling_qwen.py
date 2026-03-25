@@ -24,7 +24,6 @@ from transformers.cache_utils import (
     DynamicCache,
     EncoderDecoderCache,
     OffloadedCache,
-    QuantizedCacheConfig,
     StaticCache,
 )
 from transformers.configuration_utils import PretrainedConfig
@@ -67,7 +66,12 @@ from transformers.utils import (
     logging,
 )
 from transformers.models.qwen2.configuration_qwen2 import Qwen2Config
-from transformers.models.qwen2.modeling_qwen2 import Qwen2Model, Qwen2ForCausalLM, Qwen2DecoderLayer, Qwen2SdpaAttention, Qwen2Attention
+try:
+    from transformers.models.qwen2.modeling_qwen2 import Qwen2Model, Qwen2ForCausalLM, Qwen2DecoderLayer, Qwen2SdpaAttention, Qwen2Attention
+except ImportError:
+    # transformers >= 4.57.0: Qwen2SdpaAttention was merged into Qwen2Attention
+    from transformers.models.qwen2.modeling_qwen2 import Qwen2Model, Qwen2ForCausalLM, Qwen2DecoderLayer, Qwen2Attention
+    Qwen2SdpaAttention = Qwen2Attention
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
 from .sparse_utils import *
 

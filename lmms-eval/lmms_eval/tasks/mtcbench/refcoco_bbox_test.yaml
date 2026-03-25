@@ -1,0 +1,4 @@
+group: mtcbench_image
+task: refcoco_bbox_test_mtcbench
+test_split: test
+include: _default_template_bbox_yaml

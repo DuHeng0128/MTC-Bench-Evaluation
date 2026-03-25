@@ -1,9 +1,11 @@
 import collections
+import fcntl
 import gc
 import itertools
 import json
 import os
 import random
+from pathlib import Path
 from typing import Callable, List, Optional, Union
 
 import numpy as np
@@ -87,6 +89,7 @@ def simple_evaluate(
     force_simple: bool = False,
     num_samples: int = 1,
     baseline: Optional[str] = None,
+    reuse_responses: bool = False,
 ):
     """Instantiate and evaluate a model on a list of tasks.
 
@@ -294,6 +297,8 @@ def simple_evaluate(
         distributed_executor_backend=distributed_executor_backend,
         cli_args=cli_args,
         eval_server_launcher=eval_launcher,
+        reuse_responses=reuse_responses,
+        evaluation_tracker=evaluation_tracker,
     )
 
     if global_rank == 0:
@@ -416,6 +421,8 @@ def evaluate(
     distributed_executor_backend: str = "accelerate",
     eval_server_launcher: Optional[Union[str, Callable]] = None,
     cli_args=None,
+    reuse_responses: bool = False,
+    evaluation_tracker=None,
 ):
     """Instantiate and evaluate a model on a list of tasks.
 
@@ -564,6 +571,25 @@ def evaluate(
             # todo: may not account for padding in cases like SquadV2 which has multiple req types
             padding_requests[reqtype] += numpad
 
+    ### Load response cache if reuse_responses is enabled ###
+    response_cache: dict = {}  # key: (task_name, doc_id, idx) -> resp
+    response_cache_path: Optional[Path] = None
+    if reuse_responses and evaluation_tracker is not None and getattr(evaluation_tracker, "output_path", None):
+        response_cache_path = Path(evaluation_tracker.output_path) / "response_cache.jsonl"
+        if response_cache_path.exists():
+            with open(response_cache_path, "r", encoding="utf-8") as _f:
+                for _line in _f:
+                    _line = _line.strip()
+                    if not _line:
+                        continue
+                    try:
+                        _entry = json.loads(_line)
+                        _key = (_entry["task"], _entry["doc_id"], _entry["idx"])
+                        response_cache[_key] = _entry["resp"]
+                    except (json.JSONDecodeError, KeyError):
+                        pass
+            eval_logger.info(f"[ResponseCache] Loaded {len(response_cache)} cached responses from {response_cache_path}")
+
     ### Run LMM on inputs, get all outputs ###
     # execute each type of request
     for reqtype, reqs in requests.items():
@@ -577,8 +603,58 @@ def evaluate(
             for _ in range(padding_requests[reqtype]):
                 cloned_reqs.extend([req] * req.repeats)
 
-        # run requests through model
-        resps = getattr(lm, reqtype)(cloned_reqs)  # Choiszt run generate until
+        if response_cache_path is not None:
+            # Determine which requests are already cached vs need generation.
+            # Uses (task_name, doc_id, idx) as the stable cache key.
+            # Handles req.repeats by deduplifying: only one representative per
+            # unique key is sent to the model (correct for deterministic generation).
+            cached_by_index: dict = {}
+            seen_uncached_keys: set = set()
+            to_generate_indices: list = []
+            to_generate_reqs: list = []
+
+            for i, req in enumerate(cloned_reqs):
+                key = (req.task_name, req.doc_id, req.idx)
+                if key in response_cache:
+                    cached_by_index[i] = response_cache[key]
+                elif key not in seen_uncached_keys:
+                    seen_uncached_keys.add(key)
+                    to_generate_indices.append(i)
+                    to_generate_reqs.append(req)
+                # else: duplicate key (from repeats), will be filled later
+
+            n_cached = len(cached_by_index)
+            n_unique_gen = len(to_generate_reqs)
+            eval_logger.info(
+                f"[ResponseCache] {reqtype}: {n_cached}/{len(cloned_reqs)} from cache, "
+                f"{n_unique_gen} unique requests to generate"
+            )
+
+            if to_generate_reqs:
+                new_resps_list = getattr(lm, reqtype)(to_generate_reqs)
+                new_resp_by_key: dict = {
+                    (req.task_name, req.doc_id, req.idx): resp
+                    for req, resp in zip(to_generate_reqs, new_resps_list)
+                }
+                # Save new responses (all ranks append with exclusive file lock)
+                response_cache_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(response_cache_path, "a", encoding="utf-8") as _f:
+                    fcntl.flock(_f, fcntl.LOCK_EX)
+                    try:
+                        for key, resp in new_resp_by_key.items():
+                            _entry = {"task": key[0], "doc_id": key[1], "idx": key[2], "resp": resp}
+                            _f.write(json.dumps(_entry, ensure_ascii=False) + "\n")
+                    finally:
+                        fcntl.flock(_f, fcntl.LOCK_UN)
+                # Fill all indices (cached + newly generated, including repeat duplicates)
+                for i, req in enumerate(cloned_reqs):
+                    if i not in cached_by_index:
+                        key = (req.task_name, req.doc_id, req.idx)
+                        cached_by_index[i] = new_resp_by_key[key]
+            resps = [cached_by_index[i] for i in range(len(cloned_reqs))]
+        else:
+            # run requests through model
+            resps = getattr(lm, reqtype)(cloned_reqs)  # Choiszt run generate until
 
         # put responses from model into a list of length K for each request.
         for x, req in zip(resps, cloned_reqs):

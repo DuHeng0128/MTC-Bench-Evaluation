@@ -129,15 +129,15 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
 
         if images is not None:
             if method is not None:
-                if method.lower() == "vl-cache" or method.lower() == 'look-m' or method.lower() == 'fastv' or method.lower() == 'csp':
+                if method.lower() == "vl-cache" or method.lower() == 'look-m' or method.lower() == 'fastv' or method.lower() == 'csp' or method.lower() == 'dart':
                     (inputs, position_ids, attention_mask, _, inputs_embeds, _, text_image_mask) = self.prepare_inputs_labels_mask_for_multimodal(inputs, position_ids, attention_mask, None, None, images, modalities, image_sizes=image_sizes)
-                    # self.model.my_mask = my_mask 
-                    # transformers.models.qwen2.modeling_qwen2.Qwen2Attention.kv_cache_mask = kv_cache_mask  
+                    # self.model.my_mask = my_mask
+                    # transformers.models.qwen2.modeling_qwen2.Qwen2Attention.kv_cache_mask = kv_cache_mask
                     for layer in self.base_model.layers:
                         layer.self_attn.text_image_mask = text_image_mask
-                    
-                    if method.lower() == "fastv":
-                        self.base_model.text_image_mask = text_image_mask  # add this to support fastv
+
+                    if method.lower() == "fastv" or method.lower() == "dart":
+                        self.base_model.text_image_mask = text_image_mask  # add this to support fastv/dart
                 else:
                     (inputs, position_ids, attention_mask, _, inputs_embeds, _) = self.prepare_inputs_labels_for_multimodal(inputs, position_ids, attention_mask, None, None, images, modalities, image_sizes=image_sizes)
                 

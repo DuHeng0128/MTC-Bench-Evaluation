@@ -1,0 +1,40 @@
+dataset_path: /root/data2/lisida/MTC-Bench-Data/video/Specific_Capabilities/Fine_grained_Vision_Coverage/TempCompass
+dataset_kwargs:
+  local_files_only: True
+  verification_mode: "no_checks"
+dataset_name: "yes_no"
+task: "tempcompass_yes_no_mtcbench"
+test_split: test
+output_type: generate_until
+group: mtcbench_video
+doc_to_visual: !function utils.tempcompass_doc_to_visual
+doc_to_text: !function utils.tempcompass_doc_to_text_yes_no
+doc_to_target: !function utils.tempcompass_doc_to_answer
+process_results: !function utils.tempcompass_process_results_yes_no
+metric_list:
+  - metric: avg_accuracy
+    aggregation: !function utils.tempcompass_aggregate_rating
+    higher_is_better: true
+  - metric: speed_accuracy
+    aggregation: !function utils.tempcompass_aggregate_rating
+    higher_is_better: true
+  - metric: direction_accuracy
+    aggregation: !function utils.tempcompass_aggregate_rating
+    higher_is_better: true
+  - metric: action_accuracy
+    aggregation: !function utils.tempcompass_aggregate_rating
+    higher_is_better: true
+  - metric: order_accuracy
+    aggregation: !function utils.tempcompass_aggregate_rating
+    higher_is_better: true
+  - metric: attribute_change_accuracy
+    aggregation: !function utils.tempcompass_aggregate_rating
+    higher_is_better: true
+lmms_eval_specific_kwargs:
+  default:
+    pre_prompt: ""
+    post_prompt:
+    - "multi-choice": "\nPlease directly give the best option:"
+    - "yes_no": "\nPlease answer yes or no:"
+    - "caption_matching": "\nPlease directly give the best option:"
+    - "captioning": ""

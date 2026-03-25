@@ -221,17 +221,15 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
 
                 else:
                     from llava.model.language_model.llava_qwen import LlavaQwenConfig
+                    llava_cfg = LlavaQwenConfig.from_pretrained(model_path)
                     if overwrite_config is not None:
-                        llava_cfg = LlavaQwenConfig.from_pretrained(model_path)
                         rank0_print(f"Overwriting config with {overwrite_config}")
                         for k, v in overwrite_config.items():
                             setattr(llava_cfg, k, v)
-                        if use_sparse:
-                            model = LlavaQwenSparseForCausalLM.from_pretrained(model_path, low_cpu_mem_usage=True, attn_implementation=attn_implementation, config=llava_cfg, **kwargs)
-                        else:
-                            model = LlavaQwenForCausalLM.from_pretrained(model_path, low_cpu_mem_usage=True, attn_implementation=attn_implementation, config=llava_cfg, **kwargs)
+                    if use_sparse:
+                        model = LlavaQwenSparseForCausalLM.from_pretrained(model_path, low_cpu_mem_usage=True, attn_implementation=attn_implementation, config=llava_cfg, **kwargs)
                     else:
-                        model = LlavaQwenForCausalLM.from_pretrained(model_path, low_cpu_mem_usage=True, attn_implementation=attn_implementation, **kwargs)
+                        model = LlavaQwenForCausalLM.from_pretrained(model_path, low_cpu_mem_usage=True, attn_implementation=attn_implementation, config=llava_cfg, **kwargs)
 
             elif "gemma" in model_name.lower():
                 tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False)

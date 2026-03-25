@@ -1,0 +1,29 @@
+dataset_path: /root/data2/lisida/MTC-Bench-Data/image/Specific_Capabilities/Holistic_Vision_Coverage/CapsBench
+dataset_kwargs:
+  token: True
+  local_files_only: True
+  verification_mode: "no_checks"
+  data_files:
+    test: "data/test-00000-of-00001.parquet"
+metadata:
+  version: 0.0.1
+  gpt_eval_model_name: "gpt-3.5-turbo"
+task: "capsbench_test_mtcbench"
+test_split: test
+group: mtcbench_image
+output_type: generate_until
+
+doc_to_visual: !function utils.capsbench_doc_to_visual
+doc_to_text: !function utils.capsbench_doc_to_text
+doc_to_target: gpt-4o
+process_results: !function utils.capsbench_process_results
+
+metric_list:
+  - metric: capsbench_acc
+    aggregation: !function utils.capsbench_aggregate_accuracy
+    higher_is_better: true
+
+lmms_eval_specific_kwargs:
+  default:
+    pre_prompt: ""
+    post_prompt: "\nWrite a detailed caption describing the image."

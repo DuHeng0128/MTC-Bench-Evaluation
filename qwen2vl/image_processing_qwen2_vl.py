@@ -36,7 +36,6 @@ from transformers.image_utils import (
     ChannelDimension,
     ImageInput,
     PILImageResampling,
-    VideoInput,
     get_image_size,
     infer_channel_dimension_format,
     is_scaled_image,
@@ -46,6 +45,7 @@ from transformers.image_utils import (
     valid_images,
     validate_preprocess_arguments,
 )
+from transformers.video_utils import VideoInput
 from transformers.utils import TensorType, is_vision_available, logging
 
 

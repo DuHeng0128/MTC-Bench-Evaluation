@@ -286,6 +286,16 @@ def parse_eval_args() -> argparse.Namespace:
         help="Specify a suffix for the log_samples file name.",
     )
     parser.add_argument(
+        "--reuse_responses",
+        action="store_true",
+        default=False,
+        help=(
+            "Cache model responses to {output_path}/response_cache.jsonl and reuse them on "
+            "subsequent runs. Skips model inference for already-cached samples. "
+            "Requires --output_path. Assumes deterministic generation (temperature=0)."
+        ),
+    )
+    parser.add_argument(
         "--system_instruction",
         type=str,
         default=None,
@@ -677,6 +687,7 @@ def cli_evaluate_single(args: Union[argparse.Namespace, None] = None) -> None:
         launcher_args=args.launcher_args,
         num_samples=args.num_samples,
         baseline=args.baseline,
+        reuse_responses=args.reuse_responses,
         **request_caching_args,
     )
 

@@ -90,46 +90,21 @@ sudo apt-get update
 sudo apt-get install -y openjdk-11-jre-headless
 
 pip install -r requirements.txt
-pip install ninja omegaconf flash-attention-softmax-n
-
-conda install pytorch==2.3.0 torchvision==0.18.0 torchaudio==2.3.0 pytorch-cuda=12.1 -c pytorch -c nvidia
-conda install nvidia/label/cuda-12.1.1::cuda-nvcc
+pip install ninja flash-attention-softmax-n omegaconf==2.0.0
 ```
 
-### 2) Set CUDA_HOME (for building flash-attn)
-
+### 2) Install flash-attn
 ```bash
-mkdir -p $CONDA_PREFIX/etc/conda/activate.d
-mkdir -p $CONDA_PREFIX/etc/conda/deactivate.d
-
-# activate.d/cuda_home.sh
-cat > $CONDA_PREFIX/etc/conda/activate.d/cuda_home.sh << 'EOF'
-#!/bin/bash
-export CUDA_HOME=$(dirname $(dirname $(which nvcc)))
-EOF
-
-# deactivate.d/cuda_home.sh
-cat > $CONDA_PREFIX/etc/conda/deactivate.d/cuda_home.sh << 'EOF'
-#!/bin/bash
-unset CUDA_HOME
-EOF
-```
-
-### 3) Install flash-attn
-```bash
-conda activate mllm-efficiency
-echo $CUDA_HOME
-which nvcc
 pip install flash-attn --no-build-isolation
 ```
 
-### 4) Install lmms-eval (editable)
+### 3) Install lmms-eval (editable)
 ```bash
 cd lmms-eval
 pip install -e .
 ```
 
-### 5) Install qwen2vl (editable) for `qwen2_vl` evaluation
+### 4) Install qwen2vl (editable) for `qwen2_vl` evaluation
 ```bash
 cd ../qwen2vl
 pip install -e .

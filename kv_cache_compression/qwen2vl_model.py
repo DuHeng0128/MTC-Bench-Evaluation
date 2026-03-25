@@ -1912,3 +1912,308 @@ def qwen2vl_generation_forward_prumerge_plus(
         attentions=outputs.attentions,
         rope_deltas=self.rope_deltas,
     )
+
+
+# ===========================================================================
+# DART — Duplication-Aware Reduction of Tokens
+# ===========================================================================
+
+def get_retained_image_token_dart(
+    last_layer_state: torch.Tensor,
+    k_states: torch.Tensor,
+    image_token_start_index: int,
+    image_token_length: int,
+    budgets: float,
+    pivot_image_token: int = 4,
+    pivot_text_token: int = 4,
+) -> torch.Tensor:
+    """Core DART algorithm: select retained image tokens via duplication-aware scoring.
+
+    Args:
+        last_layer_state: normed hidden states from layer K-1, shape [batch, seq, hidden]
+        k_states: key states from layer K-1, shape [batch, num_heads, seq, head_dim]
+        image_token_start_index: index of first image token in the sequence
+        image_token_length: number of image tokens
+        budgets: fraction of image tokens to KEEP (MTC-Bench convention)
+        pivot_image_token: number of anchor image tokens (by L1 norm)
+        pivot_text_token: number of anchor text tokens (by L1 norm)
+
+    Returns:
+        Tensor of retained image token indices (absolute positions in sequence)
+    """
+    device = last_layer_state.device
+    TOKEN_TOPK = int(image_token_length * budgets / (pivot_image_token + pivot_text_token))
+    TOKEN_TOPK = max(1, TOKEN_TOPK)
+
+    # Reshape k_states: [batch, heads, seq, dim] -> [batch, seq, heads*dim]
+    k_flat = k_states.permute(0, 2, 1, 3).reshape(k_states.shape[0], k_states.shape[2], -1)
+
+    k_image = k_flat[0][image_token_start_index:image_token_start_index + image_token_length, :]
+    k_query = k_flat[0][image_token_start_index + image_token_length:, :]
+
+    # L1 norm ranking — select pivot tokens
+    image_l1 = torch.norm(k_image, p=1, dim=-1)
+    query_l1 = torch.norm(k_query, p=1, dim=-1)
+
+    n_pivot_img = min(pivot_image_token, image_l1.shape[0])
+    n_pivot_txt = min(pivot_text_token, query_l1.shape[0]) if query_l1.shape[0] > 0 else 0
+
+    image_indices = (image_l1.topk(n_pivot_img).indices + image_token_start_index).tolist()
+    if n_pivot_txt > 0:
+        query_indices = (query_l1.topk(n_pivot_txt).indices + image_token_start_index + image_token_length).tolist()
+    else:
+        query_indices = []
+
+    indices_set = set(image_indices + query_indices)
+
+    # Pool of remaining image tokens eligible for similarity expansion
+    valid_indices = set(range(image_token_start_index, image_token_start_index + image_token_length)) - set(image_indices)
+    valid_indices_list = list(valid_indices)
+
+    # For each pivot, find TOKEN_TOPK most similar remaining image tokens
+    for item in list(indices_set):
+        if len(valid_indices_list) == 0 or TOKEN_TOPK <= 0:
+            break
+        valid_vectors = last_layer_state[0][valid_indices_list, :]
+        cos_sim = -F.cosine_similarity(last_layer_state[0][item, :], valid_vectors, dim=-1)
+        k = min(TOKEN_TOPK, cos_sim.shape[0])
+        top_k_indices = cos_sim.topk(k).indices
+
+        top_k_real = [valid_indices_list[i] for i in top_k_indices]
+        indices_set.update(top_k_real)
+
+        valid_indices.difference_update(top_k_real)
+        valid_indices_list = list(valid_indices)
+
+    # Remove query indices — only keep image tokens
+    indices_set.difference_update(query_indices)
+
+    return torch.tensor(list(indices_set), device=device)
+
+
+# ---------------------------------------------------------------------------
+# DART — Attention forward for Qwen2-VL (stores k_states at layer K-1)
+# ---------------------------------------------------------------------------
+
+def qwen_vl_flash_attention_forward_dart(
+    self,
+    hidden_states: torch.Tensor,
+    attention_mask: Optional[torch.Tensor] = None,
+    position_ids: Optional[torch.LongTensor] = None,
+    past_key_value: Optional[Cache] = None,
+    output_attentions: bool = False,
+    use_cache: bool = False,
+    cache_position: Optional[torch.LongTensor] = None,
+    position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+):
+    bsz, q_len, _ = hidden_states.size()
+
+    query_states = self.q_proj(hidden_states)
+    key_states = self.k_proj(hidden_states)
+    value_states = self.v_proj(hidden_states)
+
+    query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+    key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+    value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+
+    if position_embeddings is None:
+        cos, sin = self.rotary_emb(value_states, position_ids)
+    else:
+        cos, sin = position_embeddings
+
+    query_states, key_states = apply_multimodal_rotary_pos_emb(
+        query_states, key_states, cos, sin, self.rope_scaling["mrope_section"]
+    )
+
+    if past_key_value is not None:
+        cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+        key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+
+    key_states = repeat_kv(key_states, self.num_key_value_groups)
+    value_states = repeat_kv(value_states, self.num_key_value_groups)
+
+    # DART: store k_states at layer K-1 for use in text model forward
+    if self.layer_idx == self.target_layer_idx - 1:
+        self.last_k_states = key_states  # [batch, num_heads, seq, head_dim]
+
+    dropout_rate = 0.0 if not self.training else self.attention_dropout
+
+    input_dtype = query_states.dtype
+    if input_dtype == torch.float32:
+        if torch.is_autocast_enabled():
+            target_dtype = torch.get_autocast_gpu_dtype()
+        elif hasattr(self.config, "_pre_quantization_dtype"):
+            target_dtype = self.config._pre_quantization_dtype
+        else:
+            target_dtype = self.q_proj.weight.dtype
+        query_states = query_states.to(target_dtype)
+        key_states = key_states.to(target_dtype)
+        value_states = value_states.to(target_dtype)
+
+    query_states = query_states.transpose(1, 2)
+    key_states = key_states.transpose(1, 2)
+    value_states = value_states.transpose(1, 2)
+
+    if (
+        self.config.use_sliding_window
+        and getattr(self.config, "sliding_window", None) is not None
+        and self.layer_idx >= self.config.max_window_layers
+    ):
+        sliding_window = self.config.sliding_window
+    else:
+        sliding_window = None
+
+    attn_output = _flash_attention_forward(
+        query_states,
+        key_states,
+        value_states,
+        attention_mask,
+        q_len,
+        dropout=dropout_rate,
+        sliding_window=sliding_window,
+        is_causal=self.is_causal,
+        use_top_left_mask=self._flash_attn_uses_top_left_mask,
+    )
+
+    attn_output = attn_output.reshape(bsz, q_len, self.hidden_size).contiguous()
+    attn_output = self.o_proj(attn_output)
+
+    if not output_attentions:
+        attn_weights = None
+
+    return attn_output, attn_weights, past_key_value
+
+
+# ---------------------------------------------------------------------------
+# DART — Text Model forward for Qwen2-VL
+# ---------------------------------------------------------------------------
+
+def qwen_vl_model_forward_dart(
+    self,
+    input_ids: torch.LongTensor = None,
+    attention_mask: Optional[torch.Tensor] = None,
+    position_ids: Optional[torch.LongTensor] = None,
+    past_key_values: Optional[List[torch.FloatTensor]] = None,
+    inputs_embeds: Optional[torch.FloatTensor] = None,
+    use_cache: Optional[bool] = None,
+    output_attentions: Optional[bool] = None,
+    output_hidden_states: Optional[bool] = None,
+    return_dict: Optional[bool] = None,
+    cache_position: Optional[torch.LongTensor] = None,
+) -> Union[Tuple, BaseModelOutputWithPast]:
+    output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+    output_hidden_states = (
+        output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+    )
+    use_cache = use_cache if use_cache is not None else self.config.use_cache
+    return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+    if (input_ids is None) ^ (inputs_embeds is not None):
+        raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
+
+    if self.gradient_checkpointing and self.training:
+        if use_cache:
+            use_cache = False
+
+    if use_cache and past_key_values is None and not torch.jit.is_tracing():
+        past_key_values = DynamicCache()
+
+    if inputs_embeds is None:
+        inputs_embeds = self.embed_tokens(input_ids)
+
+    batch_size, seq_length = inputs_embeds.shape[:2]
+
+    if cache_position is None:
+        past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
+        cache_position = torch.arange(
+            past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
+        )
+
+    if position_ids is None:
+        position_ids = cache_position.view(1, 1, -1).expand(3, inputs_embeds.shape[0], -1)
+    elif position_ids.dim() == 2:
+        position_ids = position_ids[None, ...].expand(3, position_ids.shape[0], -1)
+
+    causal_mask = self._update_causal_mask(
+        attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions
+    )
+
+    hidden_states = inputs_embeds
+    position_embeddings = self.rotary_emb(hidden_states, position_ids)
+
+    all_hidden_states = () if output_hidden_states else None
+    all_self_attns = () if output_attentions else None
+    next_decoder_cache = None
+
+    for decoder_layer in self.layers:
+        if output_hidden_states:
+            all_hidden_states += (hidden_states,)
+
+        # DART pruning at target_layer_idx (prefill only)
+        if decoder_layer.self_attn.layer_idx == self.target_layer_idx and seq_length > 1:
+            assert batch_size == 1, "DART only supports batch_size=1"
+            last_k_states = self.layers[self.target_layer_idx - 1].self_attn.last_k_states
+            assert last_k_states is not None, "last_k_states is None at DART target layer"
+
+            text_image_mask = self.text_image_mask[0]
+            image_positions = (text_image_mask == False).nonzero(as_tuple=True)[0]
+            assert len(image_positions) > 0, "No image tokens found; DART requires an image"
+            image_start = int(image_positions[0])
+            image_end = int(image_positions[-1])
+            image_length = image_end - image_start + 1
+
+            device = hidden_states.device
+            last_layer_state = self.norm(hidden_states)
+
+            retained = get_retained_image_token_dart(
+                last_layer_state, last_k_states,
+                image_start, image_length,
+                self.budgets, self.pivot_image_token, self.pivot_text_token,
+            )
+
+            keep_indexs = torch.cat((
+                torch.arange(image_start, device=device),
+                retained.to(device),
+                torch.arange(image_start + image_length, seq_length, device=device),
+            )).sort().values
+
+            hidden_states = hidden_states[:, keep_indexs, :]
+            if causal_mask is not None:
+                causal_mask = causal_mask[:, :, :hidden_states.shape[1], :hidden_states.shape[1]]
+            position_ids = position_ids[:, :, keep_indexs]
+            position_embeddings = self.rotary_emb(hidden_states, position_ids)
+
+        layer_outputs = decoder_layer(
+            hidden_states,
+            attention_mask=causal_mask,
+            position_ids=position_ids,
+            past_key_value=past_key_values,
+            output_attentions=output_attentions,
+            use_cache=use_cache,
+            cache_position=cache_position,
+            position_embeddings=position_embeddings,
+        )
+
+        hidden_states = layer_outputs[0]
+
+        if use_cache:
+            next_decoder_cache = layer_outputs[2 if output_attentions else 1]
+
+        if output_attentions:
+            all_self_attns += (layer_outputs[1],)
+
+    hidden_states = self.norm(hidden_states)
+
+    if output_hidden_states:
+        all_hidden_states += (hidden_states,)
+
+    next_cache = next_decoder_cache if use_cache else None
+
+    if not return_dict:
+        return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns] if v is not None)
+    return BaseModelOutputWithPast(
+        last_hidden_state=hidden_states,
+        past_key_values=next_cache,
+        hidden_states=all_hidden_states,
+        attentions=all_self_attns,
+    )

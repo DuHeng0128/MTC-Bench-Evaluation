@@ -1,0 +1,26 @@
+dataset_path: /root/data2/lisida/MTC-Bench-Data/image/General_Multimodal_Capbility/MMBench
+dataset_kwargs:
+  token: True
+  verification_mode: "no_checks"
+doc_to_target: "answer"
+lmms_eval_specific_kwargs:
+  default:
+    pre_prompt: ""
+    post_prompt: "\nAnswer with the option's letter from the given choices directly."
+doc_to_visual: !function utils.mmbench_doc_to_visual
+doc_to_text: !function utils.mmbench_doc_to_text
+doc_to_target: "answer"
+process_results: !function utils.mmbench_process_results
+model_specific_generation_kwargs:
+  llava:
+    image_aspect_ratio: original
+output_type: generate_until
+dataset_name: "en"
+generation_kwargs:
+  until:
+    - "ASSISTANT:"
+  max_new_tokens: 1024
+  temperature: 0
+  top_p: 1.0
+  num_beams: 1
+  do_sample: false

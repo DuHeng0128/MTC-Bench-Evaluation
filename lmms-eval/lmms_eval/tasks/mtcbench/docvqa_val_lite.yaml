@@ -1,0 +1,28 @@
+task: "docvqa_val_lite_mtcbench"
+test_split: train
+metric_list:
+  - metric: anls
+    aggregation: mean
+    higher_is_better: true
+dataset_path: /root/data2/lisida/MTC-Bench-Data/image/Specific_Capabilities/Fine_grained_Vision_Coverage/docvqa_val
+group: mtcbench_image
+dataset_kwargs:
+  token: True
+  local_files_only: True
+  verification_mode: "no_checks"
+output_type: generate_until
+doc_to_visual: !function utils.docvqa_doc_to_visual
+doc_to_text: !function utils.docvqa_doc_to_text
+doc_to_target: "answers"
+generation_kwargs:
+  max_new_tokens: 32
+  temperature: 0
+  do_sample: False
+lmms_eval_specific_kwargs:
+  default:
+    pre_prompt: ""
+    post_prompt: "\nAnswer the question using a single word or phrase."
+  qwen_vl:
+    pre_prompt: ""
+    post_prompt: " Answer:"
+

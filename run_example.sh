@@ -1,18 +1,17 @@
 source ~/.bashrc
 source /root/miniconda3/bin/activate
-conda activate mllm-efficiency
+conda activate eval
 
 # save result path
-ROOT_DIR="/root/EffiVLM-Bench/results"
-NUM_PROCESSES=1
+ROOT_DIR="/root/MTC-Bench-Evaluation/results"
+NUM_PROCESSES=4
 
 export HF_ENDPOINT="https://hf-mirror.com"
-export CONDA_DEFAULT_ENV="mllm-efficiency"
-export PATH="/root/miniconda3/envs/mllm-efficiency/bin:$PATH"
-export PYTHONPATH="/root/EffiVLM-Bench:/root/EffiVLM-Bench/lmms-eval"
-export OPENAI_API_URL="xxx"
-export OPENAI_API_KEY="sk-xxx"
-export CUDA_VISIBLE_DEVICES="0"
+export CONDA_DEFAULT_ENV="eval"
+export PATH="/root/miniconda3/envs/eval/bin:$PATH"
+export OPENAI_API_URL="https://api.nuwaapi.com/v1"
+export OPENAI_API_KEY="sk-76iK7BUStTCF2hDqE0l4muxM3hKH1p3s4im9lkurfhn04TdX"
+export CUDA_VISIBLE_DEVICES="0,1,2,3"
 
 
 BASE_COMMAND="python3 -m accelerate.commands.launch \
@@ -83,7 +82,7 @@ MODEL_PATH="/public/huggingface-models/Qwen/Qwen2-VL-7B-Instruct"
 MODEL_NAME="qwen2-vl"
 
 
-TASKS=("tcbench_image")
+TASKS=("mtcbench_image")
 
 for TASK in "${TASKS[@]}"; do
     for METHOD_CONFIG in "${METHODS[@]}"; do

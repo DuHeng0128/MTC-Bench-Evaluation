@@ -1397,58 +1397,29 @@ def qwen_model_forward_fastv(
         input_ids: torch.LongTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        past_key_values: Optional[Cache] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        **kwargs,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
-        
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
+        from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
+
         use_cache = use_cache if use_cache is not None else self.config.use_cache
 
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
-        if input_ids is not None and inputs_embeds is not None:
-            raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
-        elif input_ids is not None:
-            batch_size, seq_length = input_ids.shape[:2]
-        elif inputs_embeds is not None:
-            batch_size, seq_length = inputs_embeds.shape[:2]
-        else:
-            raise ValueError("You have to specify either input_ids or inputs_embeds")
-        
-        if seq_length > 1:   
-            self.layers[self.target_layer_idx].self_attn.last_attention = None
-
-        if self.gradient_checkpointing and self.training:
-            if use_cache:
-                logger.warning_once(
-                    "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`..."
-                )
-                use_cache = False
-
-        # kept for BC (non `Cache` `past_key_values` inputs)
-        return_legacy_cache = False
-        if use_cache and not isinstance(past_key_values, Cache):
-            return_legacy_cache = True
-            if past_key_values is None:
-                past_key_values = DynamicCache()
-            else:
-                past_key_values = DynamicCache.from_legacy_cache(past_key_values)
-                logger.warning_once(
-                    "We detected that you are passing `past_key_values` as a tuple of tuples. This is deprecated and "
-                    "will be removed in v4.47. Please convert your cache or use an appropriate `Cache` class "
-                    "(https://huggingface.co/docs/transformers/kv_cache#legacy-cache-format)"
-                )
+        if (input_ids is None) ^ (inputs_embeds is not None):
+            raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
+
+        batch_size, seq_length = inputs_embeds.shape[:2]
+
+        if seq_length > 1:
+            self.layers[self.target_layer_idx].self_attn.last_attention = None
+
+        if use_cache and past_key_values is None:
+            past_key_values = DynamicCache()
 
         if cache_position is None:
             past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
@@ -1458,114 +1429,81 @@ def qwen_model_forward_fastv(
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
 
-        causal_mask = self._update_causal_mask(
-            attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions
-        )
+        if not isinstance(causal_mask_mapping := attention_mask, dict):
+            mask_kwargs = {
+                "config": self.config,
+                "input_embeds": inputs_embeds,
+                "attention_mask": attention_mask,
+                "cache_position": cache_position,
+                "past_key_values": past_key_values,
+            }
+            causal_mask_mapping = {"full_attention": create_causal_mask(**mask_kwargs)}
+            if getattr(self, "has_sliding_layers", False):
+                causal_mask_mapping["sliding_attention"] = create_sliding_window_causal_mask(**mask_kwargs)
 
         hidden_states = inputs_embeds
-
-        # create position embeddings to be shared across the decoder layers
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
-        # decoder layers
-        all_hidden_states = () if output_hidden_states else None
-        all_self_attns = () if output_attentions else None
-        next_decoder_cache = None
-
         for decoder_layer in self.layers:
-            if output_hidden_states:
-                all_hidden_states += (hidden_states,)
+            if decoder_layer.self_attn.layer_idx == self.target_layer_idx and seq_length > 1:
+                ratio = self.budgets
+                assert ratio is not None, "budgets is None, please pass it"
+                assert batch_size == 1, "fastv only supports batch_size=1"
+                last_attention = self.layers[self.target_layer_idx - 1].self_attn.last_attention
+                assert last_attention is not None, "last_attention is None"
 
-            if self.gradient_checkpointing and self.training:
-                layer_outputs = self._gradient_checkpointing_func(
-                    decoder_layer.__call__,
-                    hidden_states,
-                    causal_mask,
-                    position_ids,
-                    past_key_values,
-                    output_attentions,
-                    use_cache,
-                    cache_position,
-                    position_embeddings,
-                )
-            else:          
-                if decoder_layer.self_attn.layer_idx == self.target_layer_idx and seq_length > 1:
-                    ratio = self.budgets
-                    assert ratio is not None, "budgets is None, please pass it"
-                    assert batch_size == 1, "fastv only support single batch but the batch size here > 1"
-                    last_attention = self.layers[self.target_layer_idx - 1].self_attn.last_attention
-                    assert last_attention is not None, 'last attension is None, but it should be not None'
+                text_image_mask = torch.tensor(self.text_image_mask[0])
+                image_start = int((text_image_mask == False).nonzero(as_tuple=True)[0][0])
+                image_end = int((text_image_mask == False).nonzero(as_tuple=True)[0][-1])
+                image_length = image_end - image_start + 1
 
-                    text_image_mask = torch.tensor(self.text_image_mask[0])
-                    image_start = int((text_image_mask == False).nonzero(as_tuple=True)[0][0])
-                    image_end = int((text_image_mask == False).nonzero(as_tuple=True)[0][-1])  
+                device = hidden_states.device
+                if self.origin:
+                    image_attention_score = last_attention.mean(dim=1)[0][-1][image_start:image_end + 1]
+                else:
+                    image_attention_score = last_attention.mean(dim=1)[0][:, image_start:image_end + 1].mean(dim=0)
+                top_attention_rank_index = image_attention_score.topk(max(1, int(image_length * ratio))).indices + image_start
+                keep_indexs = torch.cat((
+                    torch.arange(image_start, device=device),
+                    top_attention_rank_index,
+                    torch.arange(image_length + image_start, seq_length, device=device),
+                )).sort().values
 
-                    image_length = image_end - image_start + 1
-                    assert image_start is not None and image_end is not None, "no image token found, fastv here now is must to have an image"   # at target layer and in prefill stage
-                    
-                    device = hidden_states.device
-                    if self.origin:
-                        image_attention_score = last_attention.mean(dim=1)[0][-1][image_start:image_end + 1]    # FIXME 
-                    else:
-                        image_attention_score = last_attention.mean(dim=1)[0][:, image_start:image_end + 1].mean(dim=0)    # FIXME 
-                    top_attention_rank_index = image_attention_score.topk(max(1, int(image_length * ratio))).indices + image_start     
-                    keep_indexs = torch.cat((torch.arange(image_start,device=device), top_attention_rank_index, torch.arange(image_length+image_start,seq_length,device=device)))
-                    keep_indexs = keep_indexs.sort().values
-                    hidden_states = hidden_states[:,keep_indexs,:]
-                    if causal_mask is not None:
-                        causal_mask = causal_mask[:,:,:hidden_states.shape[1],:hidden_states.shape[1]]
-                    position_ids = keep_indexs.unsqueeze(0)
-                    position_embeddings = self.rotary_emb(hidden_states, position_ids)
+                hidden_states = hidden_states[:, keep_indexs, :]
+                for k in list(causal_mask_mapping.keys()):
+                    if causal_mask_mapping[k] is not None:
+                        N = hidden_states.shape[1]
+                        causal_mask_mapping[k] = causal_mask_mapping[k][:, :, :N, :N]
+                position_ids = keep_indexs.unsqueeze(0)
+                position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
-                layer_outputs = decoder_layer(
-                    hidden_states,
-                    attention_mask=causal_mask,
-                    position_ids=position_ids,
-                    past_key_value=past_key_values,
-                    output_attentions=output_attentions,
-                    use_cache=use_cache,
-                    cache_position=cache_position,
-                    position_embeddings=position_embeddings,
-                )
-
-            hidden_states = layer_outputs[0]
-
-            if use_cache:
-                next_decoder_cache = layer_outputs[2 if output_attentions else 1]
-
-            if output_attentions:
-                all_self_attns += (layer_outputs[1],)
+            hidden_states = decoder_layer(
+                hidden_states,
+                attention_mask=causal_mask_mapping[getattr(decoder_layer, "attention_type", "full_attention")],
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                cache_position=cache_position,
+                position_embeddings=position_embeddings,
+            )
 
         hidden_states = self.norm(hidden_states)
 
-        # add hidden states from the last decoder layer
-        if output_hidden_states:
-            all_hidden_states += (hidden_states,)
-
-        next_cache = next_decoder_cache if use_cache else None
-        if return_legacy_cache:
-            next_cache = next_cache.to_legacy_cache()
-
-        if not return_dict:
-            return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns] if v is not None)
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
-            past_key_values=next_cache,
-            hidden_states=all_hidden_states,
-            attentions=all_self_attns,
+            past_key_values=past_key_values if use_cache else None,
         )
 
-def qwen_attention_forward_fastv(self,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Cache] = None,
-        output_attentions: bool = False,
-        use_cache: bool = False,
-        cache_position: Optional[torch.LongTensor] = None,
-        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-    
+def qwen_attention_forward_fastv(
+    self,
+    hidden_states: torch.Tensor,
+    position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+    attention_mask: Optional[torch.Tensor],
+    past_key_values: Optional[Cache] = None,
+    cache_position: Optional[torch.LongTensor] = None,
+    **kwargs,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+
     bsz, q_len, _ = hidden_states.size()
 
     query_states = self.q_proj(hidden_states)
@@ -1576,57 +1514,35 @@ def qwen_attention_forward_fastv(self,
     key_states = key_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
     value_states = value_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
 
-    if position_embeddings is None:
-        logger.warning_once(
-            "The attention layers in this model are transitioning from computing the RoPE embeddings internally "
-            "through `position_ids` (2D tensor with the indexes of the tokens), to using externally computed "
-            "`position_embeddings` (Tuple of tensors, containing cos and sin). In v4.46 `position_ids` will be "
-            "removed and `position_embeddings` will be mandatory."
-        )
-        cos, sin = self.rotary_emb(value_states, position_ids)
-    else:
-        cos, sin = position_embeddings
+    cos, sin = position_embeddings
     query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
-    if past_key_value is not None:
-        cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}  # Specific to RoPE models
-        key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+    if past_key_values is not None:
+        cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+        key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
-    # repeat k/v heads if n_kv_heads < n_heads
     key_states = repeat_kv(key_states, self.num_key_value_groups)
     value_states = repeat_kv(value_states, self.num_key_value_groups)
 
     attn_weights = torch.matmul(query_states.float(), key_states.transpose(2, 3).float()) / math.sqrt(self.head_dim)
-    if attention_mask is not None:  # no matter the length, we just slice it
-        causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+    if attention_mask is not None:
+        causal_mask = attention_mask[:, :, :, :key_states.shape[-2]]
         attn_weights = attn_weights + causal_mask
 
-    # upcast attention to fp32
     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32)
 
-    if self.layer_idx == self.target_layer_idx - 1 and q_len > 1:   # prefill stage and the last layer before target layer
-        self.last_attention = attn_weights   # get the last attension
+    if self.layer_idx == self.target_layer_idx - 1 and q_len > 1:
+        self.last_attention = attn_weights
 
     attn_weights = attn_weights.to(query_states.dtype)
     attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
     attn_output = torch.matmul(attn_weights, value_states)
 
-    if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
-        raise ValueError(
-            f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
-            f" {attn_output.size()}"
-        )
-
     attn_output = attn_output.transpose(1, 2).contiguous()
-    attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
-
+    attn_output = attn_output.reshape(bsz, q_len, -1)
     attn_output = self.o_proj(attn_output)
 
-
-    if not output_attentions:
-        attn_weights = None
-
-    return attn_output, attn_weights, past_key_value
+    return attn_output, None
 
 
 def qwen_attn_forward_PyramidKV(
@@ -2672,3 +2588,174 @@ def qwen_flash_attention_forward_CSP(self,
     if not output_attentions:
         attn_weights = None
     return attn_output, attn_weights, past_key_value
+
+
+# ===========================================================================
+# DART — Duplication-Aware Reduction of Tokens (Qwen2 backbone, for LLaVA-OV)
+# ===========================================================================
+
+from .qwen2vl_model import get_retained_image_token_dart
+
+
+# ---------------------------------------------------------------------------
+# DART — Attention forward for Qwen2 (stores k_states at layer K-1)
+# ---------------------------------------------------------------------------
+
+def qwen_attention_forward_dart(
+    self,
+    hidden_states: torch.Tensor,
+    position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+    attention_mask: Optional[torch.Tensor],
+    past_key_values: Optional[Cache] = None,
+    cache_position: Optional[torch.LongTensor] = None,
+    **kwargs,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+
+    bsz, q_len, _ = hidden_states.size()
+
+    query_states = self.q_proj(hidden_states)
+    key_states = self.k_proj(hidden_states)
+    value_states = self.v_proj(hidden_states)
+
+    query_states = query_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
+    key_states = key_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
+    value_states = value_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
+
+    cos, sin = position_embeddings
+    query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+
+    if past_key_values is not None:
+        cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+        key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
+
+    key_states = repeat_kv(key_states, self.num_key_value_groups)
+    value_states = repeat_kv(value_states, self.num_key_value_groups)
+
+    # DART: store k_states at layer K-1
+    if self.layer_idx == self.target_layer_idx - 1:
+        self.last_k_states = key_states  # [batch, num_heads, seq, head_dim]
+
+    attn_weights = torch.matmul(query_states.float(), key_states.transpose(2, 3).float()) / (self.head_dim ** 0.5)
+    if attention_mask is not None:
+        causal_mask = attention_mask[:, :, :, :key_states.shape[-2]]
+        attn_weights = attn_weights + causal_mask
+
+    attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32)
+    attn_weights = attn_weights.to(query_states.dtype)
+    attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
+    attn_output = torch.matmul(attn_weights, value_states)
+
+    attn_output = attn_output.transpose(1, 2).contiguous()
+    attn_output = attn_output.reshape(bsz, q_len, -1)
+    attn_output = self.o_proj(attn_output)
+
+    return attn_output, None
+
+
+# ---------------------------------------------------------------------------
+# DART — Model forward for Qwen2 (LLaVA-OneVision text backbone)
+# ---------------------------------------------------------------------------
+
+def qwen_model_forward_dart(
+    self,
+    input_ids: torch.LongTensor = None,
+    attention_mask: Optional[torch.Tensor] = None,
+    position_ids: Optional[torch.LongTensor] = None,
+    past_key_values: Optional[Cache] = None,
+    inputs_embeds: Optional[torch.FloatTensor] = None,
+    use_cache: Optional[bool] = None,
+    cache_position: Optional[torch.LongTensor] = None,
+    **kwargs,
+) -> Union[Tuple, BaseModelOutputWithPast]:
+    from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
+
+    use_cache = use_cache if use_cache is not None else self.config.use_cache
+
+    if (input_ids is None) ^ (inputs_embeds is not None):
+        raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
+
+    if inputs_embeds is None:
+        inputs_embeds = self.embed_tokens(input_ids)
+
+    batch_size, seq_length = inputs_embeds.shape[:2]
+
+    if use_cache and past_key_values is None:
+        past_key_values = DynamicCache()
+
+    if cache_position is None:
+        past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
+        cache_position = torch.arange(
+            past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
+        )
+    if position_ids is None:
+        position_ids = cache_position.unsqueeze(0)
+
+    if not isinstance(causal_mask_mapping := attention_mask, dict):
+        mask_kwargs = {
+            "config": self.config,
+            "input_embeds": inputs_embeds,
+            "attention_mask": attention_mask,
+            "cache_position": cache_position,
+            "past_key_values": past_key_values,
+        }
+        causal_mask_mapping = {"full_attention": create_causal_mask(**mask_kwargs)}
+        if getattr(self, "has_sliding_layers", False):
+            causal_mask_mapping["sliding_attention"] = create_sliding_window_causal_mask(**mask_kwargs)
+
+    hidden_states = inputs_embeds
+    position_embeddings = self.rotary_emb(hidden_states, position_ids)
+
+    for decoder_layer in self.layers:
+        # DART pruning at target_layer_idx (prefill only)
+        if decoder_layer.self_attn.layer_idx == self.target_layer_idx and seq_length > 1:
+            assert batch_size == 1, "DART only supports batch_size=1"
+            last_k_states = self.layers[self.target_layer_idx - 1].self_attn.last_k_states
+            assert last_k_states is not None, "last_k_states is None at DART target layer"
+
+            text_image_mask = torch.tensor(self.text_image_mask[0])
+            image_positions = (text_image_mask == False).nonzero(as_tuple=True)[0]
+            assert len(image_positions) > 0, "No image tokens found; DART requires an image"
+            image_start = int(image_positions[0])
+            image_end = int(image_positions[-1])
+            image_length = image_end - image_start + 1
+
+            device = hidden_states.device
+            last_layer_state = self.norm(hidden_states)
+
+            retained = get_retained_image_token_dart(
+                last_layer_state, last_k_states,
+                image_start, image_length,
+                self.budgets, self.pivot_image_token, self.pivot_text_token,
+            )
+
+            keep_indexs = torch.cat((
+                torch.arange(image_start, device=device),
+                retained.to(device),
+                torch.arange(image_start + image_length, seq_length, device=device),
+            )).sort().values
+
+            hidden_states = hidden_states[:, keep_indexs, :]
+            for k in list(causal_mask_mapping.keys()):
+                if causal_mask_mapping[k] is not None:
+                    N = hidden_states.shape[1]
+                    causal_mask_mapping[k] = causal_mask_mapping[k][:, :, :N, :N]
+            # Qwen2 uses 2D position_ids (not 3D like Qwen2-VL)
+            position_ids = keep_indexs.unsqueeze(0)
+            position_embeddings = self.rotary_emb(hidden_states, position_ids)
+
+        hidden_states = decoder_layer(
+            hidden_states,
+            attention_mask=causal_mask_mapping[getattr(decoder_layer, "attention_type", "full_attention")],
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            cache_position=cache_position,
+            position_embeddings=position_embeddings,
+        )
+
+    hidden_states = self.norm(hidden_states)
+
+    return BaseModelOutputWithPast(
+        last_hidden_state=hidden_states,
+        past_key_values=past_key_values if use_cache else None,
+    )

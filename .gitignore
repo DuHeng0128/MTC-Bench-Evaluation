@@ -3,6 +3,10 @@ __pycache__
 *.pyc
 *.egg-info
 .vscode/
+
+# Large files
+*.whl
+results/
 dist
 datasets/*
 # Log
@@ -79,3 +83,5 @@ pruner/
 quant/
 
 index.html
+__pycache__/
+*.pyc

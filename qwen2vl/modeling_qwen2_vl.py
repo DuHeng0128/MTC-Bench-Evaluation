@@ -526,11 +526,7 @@ class Qwen2VLAttention(nn.Module):
         self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=True)
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
 
-        self.rotary_emb = Qwen2VLRotaryEmbedding(
-            self.head_dim,
-            max_position_embeddings=self.max_position_embeddings,
-            base=self.rope_theta,
-        )
+        self.rotary_emb = Qwen2VLRotaryEmbedding(config=config)
 
     def forward(
         self,
@@ -952,7 +948,7 @@ class Qwen2VLPreTrainedModel(PreTrainedModel):
     _supports_static_cache = True
 
     def _init_weights(self, module):
-        std = self.config.initializer_range
+        std = getattr(self.config, "initializer_range", 0.02)
         if isinstance(module, (nn.Linear, nn.Conv3d)):
             module.weight.data.normal_(mean=0.0, std=std)
             if module.bias is not None:

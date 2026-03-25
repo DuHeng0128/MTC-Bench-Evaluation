@@ -1,0 +1,36 @@
+dataset_path: /root/data2/lisida/MTC-Bench-Data/video/Specific_Capabilities/Holistic_Vision_Coverage/DREAM-1K
+dataset_name: DREAM-1K
+dataset_kwargs:
+  token: True
+  local_files_only: True
+  verification_mode: "no_checks"
+  data_files:
+    test: "metadata.json"
+metadata:
+  version: 0.0.1
+  gpt_eval_model_name: "gpt-3.5-turbo"
+task: "dream1k_test_mtcbench"
+test_split: test
+group: mtcbench_video
+output_type: generate_until
+
+doc_to_visual: !function utils.dream1k_doc_to_visual
+doc_to_text: !function utils.dream1k_doc_to_text
+doc_to_target: !function utils.dream1k_doc_to_target
+process_results: !function utils.dream1k_process_results
+
+metric_list:
+  - metric: dream1k_f1
+    aggregation: !function utils.dream1k_aggregate_f1
+    higher_is_better: true
+  - metric: dream1k_recall
+    aggregation: !function utils.dream1k_aggregate_recall
+    higher_is_better: true
+  - metric: dream1k_precision
+    aggregation: !function utils.dream1k_aggregate_precision
+    higher_is_better: true
+
+lmms_eval_specific_kwargs:
+  default:
+    pre_prompt: ""
+    post_prompt: "\nDescribe the video in detail."
