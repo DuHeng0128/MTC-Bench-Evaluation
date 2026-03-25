@@ -1,11 +1,10 @@
 import math
-import os
 import random as rd
 import string
 import time
 
 import pandas as pd
-import requests
+from openai import OpenAI
 from loguru import logger as eval_logger
 
 
@@ -15,7 +14,6 @@ class MMBench_Evaluator:
         self.model_version = model_version
         self.API_KEY = API_KEY
         self.API_URL = API_URL
-        self.API_TYPE = os.getenv("API_TYPE", "openai")
 
     def create_options_prompt(self, row_data, option_candidate):
         available_keys = set(row_data.keys()) & set(option_candidate)
@@ -127,19 +125,9 @@ class MMBench_Evaluator:
         return self.can_infer(item["prediction"], choices)
 
     def _post_request(self, payload):
-        if self.API_TYPE == "azure":
-            headers = {
-                "api-key": self.API_KEY,
-                "Content-Type": "application/json",
-            }
-        else:
-            headers = {
-                "Authorization": f"Bearer {self.API_KEY}",
-                "Content-Type": "application/json",
-            }
-        response = requests.post(self.API_URL, headers=headers, json=payload, timeout=30)
-        response.raise_for_status()
-        return response.json()
+        client = OpenAI(base_url=self.API_URL, api_key=self.API_KEY)
+        response = client.chat.completions.create(**payload)
+        return response
 
     def get_chat_response(self, prompt, temperature=0, max_tokens=256, n=1, patience=5, sleep_time=3):
         messages = [
@@ -152,11 +140,11 @@ class MMBench_Evaluator:
             try:
                 response = self._post_request(payload)
                 if n == 1:
-                    prediction = response["choices"][0]["message"]["content"].strip()
+                    prediction = (response.choices[0].message.content or "").strip()
                     if prediction and prediction != "":
                         return prediction
                 else:
-                    prediction = [choice["message"]["content"].strip() for choice in response["choices"]]
+                    prediction = [(choice.message.content or "").strip() for choice in response.choices]
                     if prediction and prediction[0] != "":
                         return prediction
 
