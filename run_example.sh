@@ -21,7 +21,8 @@ BASE_COMMAND="python3 -m accelerate.commands.launch \
     -m lmms_eval \
     --model qwen2_vl_with_kvcache \
     --batch_size 1 \
-    --log_samples"
+    --log_samples \
+    --reuse_responses"
 
 # --model qwen2_vl_with_kvcache for qwen2_vl
 # --model internvl2_with_kvcache for internvl2
