@@ -12,18 +12,24 @@ The codebase is adapted from **EffiVLM-Bench** and follows the same high-level i
 - `mtcbench_image`
 - `mtcbench_video`
 
-### Supported VLMs (example)
-- `Qwen2-VL` (recommended default)
-- `Llava-Onevision`
-- `InternVL2_5`
-
+### Supported VLMs
+| Model | `--model` arg |
+|---|---|
+| Qwen2-VL | `qwen2_vl_with_kvcache` |
+| Qwen2.5-VL | `qwen2_5_vl_with_kvcache` |
+| Qwen3-VL | `qwen3_vl_with_kvcache` |
+| LLaVA-OneVision | `llava_onevision_with_kvcache` |
+| LLaVA-OneVision 1.5 | `llava_onevision1_5_with_kvcache` |
+| InternVL2.5 | `internvl2_with_kvcache` |
+| InternVL3 | `internvl3_with_kvcache` |
 
 ### Supported token compression methods
 - `fastv`
 - `visionzip`
 - `prumerge+`
+- `dart`
 
-> These methods are **training-free** and typically use a **budget** parameter (e.g., `budgets=0.4`) to control the compression ratio.
+> These methods are **training-free** and use a **`budgets`** parameter (e.g., `budgets=0.4`) to control the keep ratio of visual tokens.
 
 ---
 
@@ -186,49 +192,90 @@ To evaluate videos, replace `--tasks mtcbench_image` with `--tasks mtcbench_vide
 
 ## Batch evaluation using `run_example.sh` (recommended)
 
-This repository includes a reference batch script, `run_example.sh`, that:
-- activates conda env
-- sets required environment variables
-- launches `lmms-eval` via `accelerate`
-- sweeps over **TASKS × METHODS × BUDGETS**
-- writes outputs into a consistent directory structure
+`run_example.sh` launches `lmms-eval` via `accelerate` and sweeps **TASKS × METHODS × BUDGETS** automatically, skipping any output folder that already exists.
 
-The script defines:
-- `METHODS=( "prumerge+ prumerge+ use_flash_attention_2=true" "visionzip visionzip use_flash_attention_2=true" "fastv fastv use_flash_attention_2=true" )`
-- `BUDGETS=(0.4)`
-- `TASKS=("mtcbench_image")`
-- `MODEL_PATH` and `MODEL_NAME`
-- `BASE_COMMAND` using `python3 -m accelerate.commands.launch ... -m lmms_eval ...` fileciteturn6file0
+### Key variables to configure
 
-### 1) Review and edit paths
-Open `run_example.sh` and update these variables to your local setup (examples shown):
+Open `run_example.sh` and set the following:
 
-- `ROOT_DIR="/path/to/results"`
-- `PYTHONPATH="/path/to/THIS_REPO:/path/to/THIS_REPO/lmms-eval"`
-- `CUDA_VISIBLE_DEVICES="0"`
-- `MODEL_PATH="/path/to/model_or_hf_cache_or_local_dir"`
-- `MODEL_NAME="qwen2_vl"` (or your naming convention)
-- `TASKS=("mtcbench_image")` or `("mtcbench_video")` fileciteturn6file0
+| Variable | Description | Required |
+|---|---|---|
+| `ROOT_DIR` | Directory where results are written | ✅ |
+| `MODEL_PATH` | Local path or HuggingFace model ID | ✅ |
+| `MODEL_NAME` | Label used in the output folder name | ✅ |
+| `NUM_PROCESSES` | Number of GPUs (default: `4`) | optional |
+| `CUDA_VISIBLE_DEVICES` | GPU indices to use (default: `"0,1,2,3"`) | optional |
+| `TASKS` | List of tasks, e.g. `("mtcbench_image")` or `("mtcbench_video")` | optional |
+| `BUDGETS` | Keep-ratio list, e.g. `(0.4)` or `(0.25 0.5)` | optional |
+| `OPENAI_API_KEY` / `OPENAI_API_URL` | Required only for tasks with GPT-based evaluation | optional |
 
-### 2) Important security note (API keys)
-The example script contains environment variables like `OPENAI_API_KEY`. **Do not commit real keys** into any public repository.
-Replace any secrets with placeholders and rely on local `.env`/shell exports instead. fileciteturn6file0
+> **Security note**: Do not commit real API keys. Set them via local shell exports or a `.env` file instead.
 
-### 3) Run the script
+### Selecting a model
+
+Set `--model` in `BASE_COMMAND` to match your target VLM:
+
+```bash
+--model qwen2_vl_with_kvcache            # Qwen2-VL
+--model qwen2_5_vl_with_kvcache          # Qwen2.5-VL
+--model qwen3_vl_with_kvcache            # Qwen3-VL
+--model llava_onevision_with_kvcache     # LLaVA-OneVision
+--model llava_onevision1_5_with_kvcache  # LLaVA-OneVision 1.5
+--model internvl2_with_kvcache           # InternVL2.5
+--model internvl3_with_kvcache           # InternVL3
+```
+
+### Selecting methods
+
+Each entry in `METHODS` has three space-separated fields:
+
+```
+"<method_name>  <output_label>  [additional_model_args]"
+```
+
+The third field is **optional** and is appended to `--model_args` verbatim. Examples:
+
+```bash
+METHODS=(
+    # Token pruning — Qwen2-VL / Qwen2.5-VL (requires flash-attention)
+    "fastv     fastv     use_flash_attention_2=true"
+    "visionzip visionzip use_flash_attention_2=true"
+    "prumerge+ prumerge+ use_flash_attention_2=true"
+    "dart      dart      use_flash_attention_2=true"
+
+    # Token pruning — InternVL2.5-38B (multi-GPU model parallel)
+    # "fastv     fastv     device_map=auto"
+    # "visionzip visionzip device_map=auto"
+    # "prumerge+ prumerge+ device_map=auto"
+
+    # KV cache methods — LLaVA-OneVision
+    # "h2o        head       head_adaptive=True"
+    # "snapkv     head       head_adaptive=True,pooling=avgpool"
+    # "pyramidkv  head       head_adaptive=True,pooling=avgpool"
+    # "look-m     merge      merge=True"
+    # "vl-cache   head_layer vlcache_head_adaptive=True,layer_adaptive=True"
+    # "streamingllm streamingllm"
+)
+```
+
+### Run the script
+
 ```bash
 bash run_example.sh
 ```
 
-### 4) Result directory naming
-The script writes outputs like:
+### Result directory naming
+
+Outputs are written to:
 
 ```text
 $ROOT_DIR/${MODEL_NAME}_${METHOD}_${TASK}_${BUDGET}_${FILENAME}
 ```
 
-and skips execution if the output folder already exists. fileciteturn6file0
+If the folder already exists, that combination is skipped automatically.
 
 ---
+
 
 ## Outputs
 
