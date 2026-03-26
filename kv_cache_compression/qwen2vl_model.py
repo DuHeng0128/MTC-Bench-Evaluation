@@ -1470,13 +1470,35 @@ def qwen2vl_generation_forward_visionzip(
 
         if pixel_values_videos is not None:
             pixel_values_videos = pixel_values_videos.type(self.visual.get_dtype())
-            video_embeds = self.visual(pixel_values_videos, grid_thw=video_grid_thw)
-            n_video_tokens = (input_ids == self.config.video_token_id).sum().item()
-            n_video_features = video_embeds.shape[0]
-            if n_video_tokens != n_video_features:
-                raise ValueError(
-                    f"Video features and video tokens do not match: tokens: {n_video_tokens}, features {n_video_features}"
-                )
+            # vision tower is patched and returns (compressed_embeds, all_indices)
+            video_embeds, video_all_indices = self.visual(pixel_values_videos, grid_thw=video_grid_thw)
+            n_video_tokens = video_embeds.shape[0]
+
+            total_len = input_ids.shape[-1]
+            assert input_ids.shape[0] == 1, 'visionzip only supports single batch, assert in qwen2vl_generation_forward_visionzip (video branch)'
+            # vision_start (151652) and vision_end (151653) tokens bracket both image and video regions
+            position_vid_begin = (input_ids[0] == 151652).nonzero(as_tuple=True)[0]
+            before_idx = position_vid_begin[0].item() + 1
+            before_vid = input_ids[:, :before_idx]
+            position_vid_end = (input_ids[0] == 151653).nonzero(as_tuple=True)[0]
+            post_idx = position_vid_end[-1].item()
+            post_vid = input_ids[:, post_idx:]
+            vid_tensor = torch.full(
+                (input_ids.shape[0], n_video_tokens),
+                self.config.video_token_id,
+                dtype=input_ids.dtype,
+                device=input_ids.device,
+            )
+            origin_input_ids = deepcopy(input_ids)
+            input_ids = torch.cat((before_vid, vid_tensor, post_vid), dim=1)
+            video_all_indices = video_all_indices + before_idx
+            all_indices = torch.cat((
+                torch.arange(0, before_idx, device=video_all_indices.device),
+                video_all_indices,
+                torch.arange(post_idx, total_len, device=video_all_indices.device),
+            ))
+            inputs_embeds = inputs_embeds[:, all_indices, :]
+
             video_mask = (
                 (input_ids == self.config.video_token_id)
                 .unsqueeze(-1)
@@ -1485,6 +1507,11 @@ def qwen2vl_generation_forward_visionzip(
             )
             video_embeds = video_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
             inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
+
+            text_image_mask = (input_ids != self.config.video_token_id)
+            self.base_model.text_image_mask = text_image_mask
+            for layer in self.base_model.layers:
+                layer.self_attn.text_image_mask = text_image_mask
 
         if attention_mask is not None:
             attention_mask = attention_mask.to(inputs_embeds.device)
@@ -1825,13 +1852,35 @@ def qwen2vl_generation_forward_prumerge_plus(
 
         if pixel_values_videos is not None:
             pixel_values_videos = pixel_values_videos.type(self.visual.get_dtype())
-            video_embeds = self.visual(pixel_values_videos, grid_thw=video_grid_thw)
-            n_video_tokens = (input_ids == self.config.video_token_id).sum().item()
-            n_video_features = video_embeds.shape[0]
-            if n_video_tokens != n_video_features:
-                raise ValueError(
-                    f"Video features and video tokens do not match: tokens: {n_video_tokens}, features {n_video_features}"
-                )
+            # vision tower is patched and returns (compressed_embeds, all_indices)
+            video_embeds, video_all_indices = self.visual(pixel_values_videos, grid_thw=video_grid_thw)
+            n_video_tokens = video_embeds.shape[0]
+
+            total_len = input_ids.shape[-1]
+            assert input_ids.shape[0] == 1, 'prumerge+ only supports single batch, assert in qwen2vl_generation_forward_prumerge_plus (video branch)'
+            # vision_start (151652) and vision_end (151653) tokens bracket both image and video regions
+            position_vid_begin = (input_ids[0] == 151652).nonzero(as_tuple=True)[0]
+            before_idx = position_vid_begin[0].item() + 1
+            before_vid = input_ids[:, :before_idx]
+            position_vid_end = (input_ids[0] == 151653).nonzero(as_tuple=True)[0]
+            post_idx = position_vid_end[-1].item()
+            post_vid = input_ids[:, post_idx:]
+            vid_tensor = torch.full(
+                (input_ids.shape[0], n_video_tokens),
+                self.config.video_token_id,
+                dtype=input_ids.dtype,
+                device=input_ids.device,
+            )
+            origin_input_ids = deepcopy(input_ids)
+            input_ids = torch.cat((before_vid, vid_tensor, post_vid), dim=1)
+            video_all_indices = video_all_indices + before_idx
+            all_indices = torch.cat((
+                torch.arange(0, before_idx, device=video_all_indices.device),
+                video_all_indices,
+                torch.arange(post_idx, total_len, device=video_all_indices.device),
+            ))
+            inputs_embeds = inputs_embeds[:, all_indices, :]
+
             video_mask = (
                 (input_ids == self.config.video_token_id)
                 .unsqueeze(-1)
@@ -1840,6 +1889,11 @@ def qwen2vl_generation_forward_prumerge_plus(
             )
             video_embeds = video_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
             inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
+
+            text_image_mask = (input_ids != self.config.video_token_id)
+            self.base_model.text_image_mask = text_image_mask
+            for layer in self.base_model.layers:
+                layer.self_attn.text_image_mask = text_image_mask
 
         if attention_mask is not None:
             attention_mask = attention_mask.to(inputs_embeds.device)

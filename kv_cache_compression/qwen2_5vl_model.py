@@ -497,13 +497,18 @@ def qwen2_5vl_vision_tower_forward_visionzip(
     cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
 
     n_blocks = len(self.blocks)
-    # Use the last fullatt block for scoring so attention weights reflect global (not windowed) importance.
-    # In Qwen2.5-VL/Qwen3-VL, non-fullatt blocks use windowed attention which gives poor global scores.
+    # Use the second-to-last fullatt block for scoring — mirrors VisionZip paper's "second-to-last layer"
+    # design. The last fullatt block (block 31) sits immediately before the merger and its features may
+    # be over-specialised for merger input, giving poor discriminative attention for text / OCR tokens.
+    # The second-to-last fullatt block (block 23 for Qwen2.5-VL/Qwen3-VL) retains global attention but
+    # still has several processing steps remaining, yielding more discriminative scores.
     fullatt_indexes = getattr(self, 'fullatt_block_indexes', None)
-    if fullatt_indexes:
-        target_block_idx = fullatt_indexes[-1]
+    if fullatt_indexes and len(fullatt_indexes) >= 2:
+        target_block_idx = fullatt_indexes[-2]  # second-to-last fullatt (e.g. block 23 for Qwen2.5-VL)
+    elif fullatt_indexes:
+        target_block_idx = fullatt_indexes[-1]  # only one fullatt block — no choice
     else:
-        target_block_idx = n_blocks - 2  # fallback for architectures with all-fullatt vision blocks
+        target_block_idx = n_blocks - 2  # all-fullatt architecture (e.g. Qwen2-VL), use second-to-last
 
     for layer_num, blk in enumerate(self.blocks):
         cu_seqlens_now = cu_seqlens if layer_num in self.fullatt_block_indexes else cu_window_seqlens
@@ -929,8 +934,11 @@ def qwen2_5vl_vision_tower_forward_prumerge_plus(
     cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
 
     n_blocks = len(self.blocks)
+    # Second-to-last fullatt block for scoring — see visionzip tower for rationale.
     fullatt_indexes = getattr(self, 'fullatt_block_indexes', None)
-    if fullatt_indexes:
+    if fullatt_indexes and len(fullatt_indexes) >= 2:
+        target_block_idx = fullatt_indexes[-2]
+    elif fullatt_indexes:
         target_block_idx = fullatt_indexes[-1]
     else:
         target_block_idx = n_blocks - 2

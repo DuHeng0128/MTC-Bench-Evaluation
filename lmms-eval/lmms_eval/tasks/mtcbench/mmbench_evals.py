@@ -125,7 +125,7 @@ class MMBench_Evaluator:
         return self.can_infer(item["prediction"], choices)
 
     def _post_request(self, payload):
-        client = OpenAI(base_url=self.API_URL, api_key=self.API_KEY)
+        client = OpenAI(base_url=self.API_URL, api_key=self.API_KEY, timeout=30.0)
         response = client.chat.completions.create(**payload)
         return response
 

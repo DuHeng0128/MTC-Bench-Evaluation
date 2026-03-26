@@ -64,7 +64,7 @@ elif API_TYPE == "azure":
         "api-key": API_KEY,
         "Content-Type": "application/json",
     }
-client = OpenAI(base_url=API_URL, api_key=API_KEY)
+client = OpenAI(base_url=API_URL, api_key=API_KEY, timeout=30.0)
 
 with open(Path(__file__).parent / "gqa_lite.yaml", "r") as f:
     raw_data = f.readlines()

@@ -167,7 +167,7 @@ class MathVistaEvaluator:
         self.api_key = api_key
         self.gpt_model = gpt_model
         self.quick_extract = quick_extract
-        self.client = OpenAI(base_url=self.API_URL, api_key=api_key)
+        self.client = OpenAI(base_url=self.API_URL, api_key=api_key, timeout=30.0)
 
     def get_chat_response_openai(self, prompt, temperature=0, max_tokens=256, n=1):
         response = self.client.chat.completions.create(

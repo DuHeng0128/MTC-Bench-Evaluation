@@ -668,9 +668,16 @@ def replace_qwen2_5vl(args, model, method):
         print('using visionzip')
         import transformers.models.qwen2_5_vl.modeling_qwen2_5_vl as q25vl
         n_blocks = len(model.visual.blocks)
-        # Use the last fullatt block for scoring; windowed-attention blocks give poor global scores
+        # Second-to-last fullatt block: VisionZip paper uses second-to-last layer for scoring.
+        # block[-1] (last fullatt, e.g. 31) is specialised for merger input; block[-2] (e.g. 23)
+        # gives more discriminative global attention for text / OCR content.
         fullatt_indexes = getattr(model.visual, 'fullatt_block_indexes', None)
-        target_block_idx = fullatt_indexes[-1] if fullatt_indexes else n_blocks - 2
+        if fullatt_indexes and len(fullatt_indexes) >= 2:
+            target_block_idx = fullatt_indexes[-2]
+        elif fullatt_indexes:
+            target_block_idx = fullatt_indexes[-1]
+        else:
+            target_block_idx = n_blocks - 2
         for idx, blk in enumerate(model.visual.blocks):
             blk.attn.layer_idx = idx
             blk.attn.target_layer_idx = target_block_idx
@@ -685,7 +692,12 @@ def replace_qwen2_5vl(args, model, method):
         import transformers.models.qwen2_5_vl.modeling_qwen2_5_vl as q25vl
         n_blocks = len(model.visual.blocks)
         fullatt_indexes = getattr(model.visual, 'fullatt_block_indexes', None)
-        target_block_idx = fullatt_indexes[-1] if fullatt_indexes else n_blocks - 2
+        if fullatt_indexes and len(fullatt_indexes) >= 2:
+            target_block_idx = fullatt_indexes[-2]
+        elif fullatt_indexes:
+            target_block_idx = fullatt_indexes[-1]
+        else:
+            target_block_idx = n_blocks - 2
         for idx, blk in enumerate(model.visual.blocks):
             blk.attn.layer_idx = idx
             blk.attn.target_layer_idx = target_block_idx
@@ -825,7 +837,12 @@ def replace_qwen3vl(args, model, method):
             raise ImportError("Qwen3VL module not found; upgrade transformers.")
         n_blocks = len(model.visual.blocks)
         fullatt_indexes = getattr(model.visual, 'fullatt_block_indexes', None)
-        target_block_idx = fullatt_indexes[-1] if fullatt_indexes else n_blocks - 2
+        if fullatt_indexes and len(fullatt_indexes) >= 2:
+            target_block_idx = fullatt_indexes[-2]
+        elif fullatt_indexes:
+            target_block_idx = fullatt_indexes[-1]
+        else:
+            target_block_idx = n_blocks - 2
         for idx, blk in enumerate(model.visual.blocks):
             blk.attn.layer_idx = idx
             blk.attn.target_layer_idx = target_block_idx
@@ -843,7 +860,12 @@ def replace_qwen3vl(args, model, method):
             raise ImportError("Qwen3VL module not found; upgrade transformers.")
         n_blocks = len(model.visual.blocks)
         fullatt_indexes = getattr(model.visual, 'fullatt_block_indexes', None)
-        target_block_idx = fullatt_indexes[-1] if fullatt_indexes else n_blocks - 2
+        if fullatt_indexes and len(fullatt_indexes) >= 2:
+            target_block_idx = fullatt_indexes[-2]
+        elif fullatt_indexes:
+            target_block_idx = fullatt_indexes[-1]
+        else:
+            target_block_idx = n_blocks - 2
         for idx, blk in enumerate(model.visual.blocks):
             blk.attn.layer_idx = idx
             blk.attn.target_layer_idx = target_block_idx

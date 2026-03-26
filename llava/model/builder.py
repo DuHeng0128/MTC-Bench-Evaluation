@@ -26,8 +26,6 @@ from llava.model.language_model.sparse_llava_qwen import LlavaQwenSparseForCausa
 
 
 def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, load_4bit=False, device_map="auto", torch_dtype="bfloat16",attn_implementation="eager", customized_config=None, overwrite_config=None, use_sparse=False, **kwargs):
-    if attn_implementation is "eager":
-        attn_implementation = "flash_attention_2"
     kwargs["device_map"] = device_map
 
     if load_8bit:

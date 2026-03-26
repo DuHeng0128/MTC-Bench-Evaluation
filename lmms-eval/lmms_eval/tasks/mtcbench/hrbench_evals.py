@@ -21,7 +21,7 @@ class HRBenchEval:
         self.max_workers = max_workers
 
         self.base_url = self._normalize_base_url(self.RAW_API_URL)
-        self.client = OpenAI(base_url=self.base_url, api_key=self.api_key)
+        self.client = OpenAI(base_url=self.base_url, api_key=self.api_key, timeout=30.0)
 
     @staticmethod
     def _normalize_base_url(url: str) -> str:

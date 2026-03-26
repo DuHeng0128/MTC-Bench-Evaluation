@@ -272,9 +272,13 @@ def prepare_inputs_labels_for_multimodal_visionzip(self, input_ids, position_ids
         keep_idx = torch.split(keep_idx, split_sizes)
         image_features = []
         contextual_features = []
-        for idx, image_feat in enumerate(encoded_image_features):   
+        for idx, image_feat in enumerate(encoded_image_features):
             if idx in video_idx_in_batch:
-                image_features.append(self.get_2dPool(image_feat))
+                # VisionZip compresses each frame spatially; get_2dPool expects the original
+                # 729-token grid layout and would fail on compressed tokens. Instead, keep the
+                # compressed frame features as-is: [num_frames, compressed_tokens, dim].
+                # Downstream flatten(0, 1) in the spatial-merge path handles arbitrary token counts.
+                image_features.append(image_feat)
             else:
                 current_keep_idx = keep_idx[idx]
                 num_patches = image_feat.shape[0]
@@ -766,9 +770,13 @@ def prepare_inputs_labels_for_multimodal_prumerge_plus(self, input_ids, position
         keep_idx = torch.split(keep_idx, split_sizes)
         image_features = []
         contextual_features = []
-        for idx, image_feat in enumerate(encoded_image_features):  
+        for idx, image_feat in enumerate(encoded_image_features):
             if idx in video_idx_in_batch:
-                image_features.append(self.get_2dPool(image_feat))
+                # VisionZip/Prumerge+ compresses each frame spatially; get_2dPool expects the
+                # original 729-token grid layout and would fail on compressed tokens. Keep the
+                # compressed frame features as-is: [num_frames, compressed_tokens, dim].
+                # Downstream flatten(0, 1) in the spatial-merge path handles arbitrary token counts.
+                image_features.append(image_feat)
             else:
                 current_keep_idx = keep_idx[idx]
                 num_patches = image_feat.shape[0]
@@ -778,7 +786,7 @@ def prepare_inputs_labels_for_multimodal_prumerge_plus(self, input_ids, position
                 contextual_num = total_token_num - dominant_num
                 # dominant_feature is the selected tokens
                 dominant_feature = image_feat[:, :dominant_num, :]
-                
+
                 # contextual_feature is the last additional token added
                 if contextual_num > 0:
                     contextual_feature = image_feat[:, -contextual_num:, :]
