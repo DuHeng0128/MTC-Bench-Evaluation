@@ -1,16 +1,16 @@
 source ~/.bashrc
 source /root/miniconda3/bin/activate
-conda activate eval
+conda activate mtcbench-eval
 
 # save result path
 ROOT_DIR="/root/MTC-Bench-Evaluation/results"
 NUM_PROCESSES=4
 
 export HF_ENDPOINT="https://hf-mirror.com"
-export CONDA_DEFAULT_ENV="eval"
-export PATH="/root/miniconda3/envs/eval/bin:$PATH"
-export OPENAI_API_URL="https://api.nuwaapi.com/v1"
-export OPENAI_API_KEY="sk-76iK7BUStTCF2hDqE0l4muxM3hKH1p3s4im9lkurfhn04TdX"
+export CONDA_DEFAULT_ENV="mtcbench-eval"
+export PATH="/root/miniconda3/envs/mtcbench-eval/bin:$PATH"
+export OPENAI_API_URL="YOUR_OPENAI_API_URL"
+export OPENAI_API_KEY="YOUR_OPENAI_API_KEY"
 export CUDA_VISIBLE_DEVICES="0,1,2,3"
 
 
@@ -79,7 +79,7 @@ METHODS=(
 BUDGETS=(0.4)
 
 # model path
-MODEL_PATH="/public/huggingface-models/Qwen/Qwen2-VL-7B-Instruct"
+MODEL_PATH="Qwen/Qwen2-VL-7B-Instruct"
 MODEL_NAME="qwen2-vl"
 
 
