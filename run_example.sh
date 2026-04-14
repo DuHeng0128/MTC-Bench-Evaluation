@@ -58,6 +58,7 @@ METHODS=(
     "prumerge+ prumerge+ use_flash_attention_2=true"
     "visionzip visionzip use_flash_attention_2=true"
     "fastv fastv use_flash_attention_2=true"
+    # "pdrop pdrop layer_list=[7,14,21],image_token_ratio_list=[0.3893,0.1516,0.0590],use_flash_attention_2=true"
     
     # InternVL2_5-38B kv cache method for example
     # "h2o head head_adaptive=True,device_map=auto"

@@ -6,6 +6,9 @@ ROOT_DIR="/root/MTC-Bench-Evaluation/results"
 NUM_PROCESSES=4
 TASKS=("mtcbench_image")
 BUDGETS=(0.4)
+# `0.4` means the average vision-token ratio across all LLM layers.
+# In the Qwen2-VL PDrop method example below, the 28 layers are split into four 7-layer stages with average ratio 0.4.
+# (1 + x + x^2 + x^3) / 4 = 0.4 -> x ~= 0.3893, so [7,14,21] -> [0.3893,0.1516,0.0590].
 
 export HF_ENDPOINT="https://hf-mirror.com"
 export CONDA_DEFAULT_ENV="mtcbench-eval"
@@ -79,6 +82,7 @@ run_eval() {
 # ═══════════════════════════════════════════════════════════════════════════════
 METHODS_QWEN2VL=(
     "fastv     fastv     use_flash_attention_2=true"
+    "pdrop     pdrop     layer_list=[7,14,21],image_token_ratio_list=[0.3893,0.1516,0.0590],use_flash_attention_2=true"
     "visionzip visionzip use_flash_attention_2=true"
     "prumerge+ prumerge+ use_flash_attention_2=true"
     # "dart      dart      use_flash_attention_2=true"
@@ -154,6 +158,8 @@ run_eval "llava_onevision_with_kvcache" \
 # ═══════════════════════════════════════════════════════════════════════════════
 METHODS_LLAVA_OV15=(
     "fastv     fastv"
+    # Applies to both mtcbench_image and mtcbench_video in TASKS above.
+    "pdrop     pdrop     layer_list=[9,18,27],image_token_ratio_list=[0.3893,0.1516,0.0590]"
     "visionzip visionzip"
     "prumerge+ prumerge+"
     # "dart      dart"

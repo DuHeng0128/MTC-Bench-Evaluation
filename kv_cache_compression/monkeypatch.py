@@ -1,4 +1,4 @@
-      
+import ast
 import sys
 import transformers
 from transformers.models.qwen2.modeling_qwen2 import Qwen2Attention
@@ -60,6 +60,8 @@ import qwen2vl
 from .qwen2vl_model import (
     qwen_vl_model_forward_fastv,
     qwen_vl_flash_attention_forward_fastv,
+    qwen_vl_model_forward_pdrop,
+    qwen_vl_flash_attention_forward_pdrop,
     qwen2vl_vision_flash_attention2_forward_visionzip,
     qwen2vl_vision_tower_forward_visionzip,
     qwen2vl_vision_block_forward_visionzip,
@@ -76,6 +78,9 @@ from .qwen2_5vl_model import (
     qwen2_5vl_flash_attention_forward_fastv,
     qwen2_5vl_text_model_forward_fastv,
     qwen2_5vl_generation_forward_fastv,
+    qwen2_5vl_flash_attention_forward_pdrop,
+    qwen2_5vl_text_model_forward_pdrop,
+    qwen2_5vl_generation_forward_pdrop,
     qwen2_5vl_vision_attention_forward_visionzip,
     qwen2_5vl_vision_block_forward_visionzip,
     qwen2_5vl_vision_tower_forward_visionzip,
@@ -88,6 +93,62 @@ from .qwen2_5vl_model import (
     qwen2_5vl_text_model_forward_dart,
     qwen2_5vl_generation_forward_dart,
 )
+
+
+def _parse_stage_list_arg(value, arg_name, cast_type):
+    if value is None:
+        raise ValueError(f"`{arg_name}` is required for pdrop")
+
+    if isinstance(value, (list, tuple)):
+        items = list(value)
+    elif isinstance(value, str):
+        value = value.strip()
+        if not value:
+            raise ValueError(f"`{arg_name}` cannot be empty")
+        if value.startswith("[") and value.endswith("]"):
+            parsed = ast.literal_eval(value)
+            if not isinstance(parsed, (list, tuple)):
+                raise ValueError(f"`{arg_name}` must parse to a list or tuple")
+            items = list(parsed)
+        else:
+            delimiter = "|" if "|" in value else ","
+            items = [item.strip() for item in value.split(delimiter) if item.strip()]
+    else:
+        items = [value]
+
+    if not items:
+        raise ValueError(f"`{arg_name}` cannot be empty")
+    return [cast_type(item) for item in items]
+
+
+def _resolve_qwen2vl_pdrop_config(args):
+    layer_list = _parse_stage_list_arg(getattr(args, "layer_list", None), "layer_list", int)
+    image_token_ratio_list = _parse_stage_list_arg(
+        getattr(args, "image_token_ratio_list", None),
+        "image_token_ratio_list",
+        float,
+    )
+
+    if len(layer_list) != len(image_token_ratio_list):
+        raise ValueError("`layer_list` and `image_token_ratio_list` must have the same length")
+
+    stage_pairs = sorted(zip(layer_list, image_token_ratio_list), key=lambda item: item[0])
+    resolved_layer_list = [layer for layer, _ in stage_pairs]
+    resolved_ratio_list = [ratio for _, ratio in stage_pairs]
+
+    if len(set(resolved_layer_list)) != len(resolved_layer_list):
+        raise ValueError("`layer_list` must not contain duplicate layers")
+    if any(layer <= 0 for layer in resolved_layer_list):
+        raise ValueError("`layer_list` entries must be > 0 so pdrop can read the previous layer attention")
+    if any(ratio <= 0 or ratio > 1 for ratio in resolved_ratio_list):
+        raise ValueError("`image_token_ratio_list` entries must be in the interval (0, 1]")
+    if any(
+        later_ratio > earlier_ratio
+        for earlier_ratio, later_ratio in zip(resolved_ratio_list, resolved_ratio_list[1:])
+    ):
+        raise ValueError("`image_token_ratio_list` must be non-increasing across stages")
+
+    return resolved_layer_list, resolved_ratio_list
 
 
 def replace_qwen(args, model, method):
@@ -296,6 +357,22 @@ def replace_qwen2vl(args, model, method):
                 module.forward = types.MethodType(qwen_vl_model_forward_fastv, module)
                 module.target_layer_idx = getattr(args, 'target_layer_idx', 2)
                 module.budgets = getattr(args, 'budgets', 1.0)
+                module.origin = getattr(args, 'origin', False)
+
+    elif method == 'pdrop':
+        print('using pdrop')
+        layer_list, image_token_ratio_list = _resolve_qwen2vl_pdrop_config(args)
+        pdrop_prev_layer_idxs = set(layer - 1 for layer in layer_list)
+        pdrop_layer_to_ratio = dict(zip(layer_list, image_token_ratio_list))
+        for name, module in model.named_modules():
+            if isinstance(module, Qwen2VLFlashAttention2):
+                module.forward = types.MethodType(qwen_vl_flash_attention_forward_pdrop, module)
+                module.pdrop_prev_layer_idxs = pdrop_prev_layer_idxs
+            if isinstance(module, Qwen2VLModel):
+                module.forward = types.MethodType(qwen_vl_model_forward_pdrop, module)
+                module.pdrop_layer_list = layer_list
+                module.pdrop_image_token_ratio_list = image_token_ratio_list
+                module.pdrop_layer_to_ratio = pdrop_layer_to_ratio
                 module.origin = getattr(args, 'origin', False)
 
     elif method == 'visionzip':
@@ -663,6 +740,27 @@ def replace_qwen2_5vl(args, model, method):
                 module.origin = getattr(args, 'origin', False)
         import transformers.models.qwen2_5_vl.modeling_qwen2_5_vl as q25vl
         q25vl.Qwen2_5_VLForConditionalGeneration.forward = qwen2_5vl_generation_forward_fastv
+
+    elif method == 'pdrop':
+        print('using pdrop')
+        from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
+            Qwen2_5_VLTextModel, Qwen2_5_VLForConditionalGeneration,
+        )
+        import transformers.models.qwen2_5_vl.modeling_qwen2_5_vl as q25vl
+        layer_list, image_token_ratio_list = _resolve_qwen2vl_pdrop_config(args)
+        pdrop_prev_layer_idxs = set(layer - 1 for layer in layer_list)
+        pdrop_layer_to_ratio = dict(zip(layer_list, image_token_ratio_list))
+        for name, module in model.named_modules():
+            if isinstance(module, Qwen2_5_VLAttention):
+                module.forward = types.MethodType(qwen2_5vl_flash_attention_forward_pdrop, module)
+                module.pdrop_prev_layer_idxs = pdrop_prev_layer_idxs
+            if isinstance(module, Qwen2_5_VLTextModel):
+                module.forward = types.MethodType(qwen2_5vl_text_model_forward_pdrop, module)
+                module.pdrop_layer_list = layer_list
+                module.pdrop_image_token_ratio_list = image_token_ratio_list
+                module.pdrop_layer_to_ratio = pdrop_layer_to_ratio
+                module.origin = getattr(args, 'origin', False)
+        q25vl.Qwen2_5_VLForConditionalGeneration.forward = qwen2_5vl_generation_forward_pdrop
 
     elif method == 'visionzip':
         print('using visionzip')

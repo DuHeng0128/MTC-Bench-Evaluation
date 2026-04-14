@@ -1,4 +1,5 @@
 import argparse
+import inspect
 import re
 from typing import List, Optional, Tuple, Union
 
@@ -109,20 +110,30 @@ class Llava_OneVision1_5_with_kvcache(lmms):
         self.method = method
         if self.method is not None:
             model_type = getattr(self._model.config, "model_type", "")
-            if "qwen2_5" in model_type or "qwen2.5" in model_type:
+            llm_config = getattr(self._model.config, "text_config", None)
+            llm_type = getattr(llm_config, "model_type", "") if llm_config else ""
+            backbone_type = f"{model_type} {llm_type}".lower()
+            if (
+                "qwen2_5" in backbone_type
+                or "qwen2.5" in backbone_type
+                or "llavaonevision1_5" in backbone_type
+            ):
                 from kv_cache_compression.monkeypatch import replace_qwen2_5vl
                 replace_qwen2_5vl(self.args, self._model, self.method.lower())
-            elif "qwen2" in model_type:
+            elif "qwen2" in backbone_type:
                 from kv_cache_compression.monkeypatch import replace_qwen
                 replace_qwen(self.args, self._model, self.method.lower())
-            elif "llama" in model_type:
+            elif "llama" in backbone_type:
                 from kv_cache_compression.monkeypatch import replace_llama
                 replace_llama(self.args, self._model, self.method.lower())
-            elif "mistral" in model_type:
+            elif "mistral" in backbone_type:
                 from kv_cache_compression.monkeypatch import replace_mistral
                 replace_mistral(self.args, self._model, self.method.lower())
             else:
-                eval_logger.warning(f"[llava_onevision1_5_with_kvcache] Unknown model_type '{model_type}', skipping kvcache monkeypatch.")
+                eval_logger.warning(
+                    f"[llava_onevision1_5_with_kvcache] Unknown model_type '{model_type}' "
+                    f"(text backbone '{llm_type}'), skipping kvcache monkeypatch."
+                )
 
         self.max_pixels = max_pixels
         self.min_pixels = min_pixels
@@ -344,6 +355,9 @@ class Llava_OneVision1_5_with_kvcache(lmms):
                 "max_new_tokens": current_gen_kwargs["max_new_tokens"],
                 "use_cache": self.use_cache,
             }
+            generate_signature = inspect.signature(self.model.generate)
+            if "second_per_grid_ts" not in generate_signature.parameters:
+                gen_args.pop("second_per_grid_ts", None)
             if do_sample:
                 gen_args.update(
                     do_sample=True,

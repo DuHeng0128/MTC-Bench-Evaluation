@@ -25,6 +25,7 @@ The codebase is adapted from **EffiVLM-Bench** and follows the same high-level i
 - `visionzip`
 - `prumerge+`
 - `dart`
+- `pdrop`
 
 > These methods are **training-free** and use a **`budgets`** parameter (e.g., `budgets=0.4`) to control the keep ratio of visual tokens.
 
@@ -144,7 +145,7 @@ lmms-eval \
 ## Option B — Single-command evaluation with token compression
 
 This repository enables compression methods via `--model_args`:
-- `method` selects the algorithm (`fastv | visionzip | prumerge+`)
+- `method` selects the algorithm (`fastv | visionzip | prumerge+ | pdrop`)
 - `budgets` controls the compression budget (0–1)
 - some models/methods require extra args such as `use_flash_attention_2=true`
 
@@ -192,6 +193,25 @@ lmms-eval \
   --batch_size 1 \
   --device cuda:0 \
   --output_path ./results/mtcbench_qwen2_vl_prumergeplus_b0.4
+```
+
+### PDrop (example)
+`pdrop` currently provides staged visual-token pruning examples for `Qwen2-VL` and `LLaVA-OneVision 1.5`.
+It requires two extra arguments:
+
+- `layer_list`: pruning layers
+- `image_token_ratio_list`: retained image-token ratios after each stage
+
+The two lists must have the same length, and `image_token_ratio_list` should be non-increasing across stages.
+
+```bash
+lmms-eval \
+  --model qwen2_vl_with_kvcache \
+  --model_args 'pretrained="Qwen/Qwen2-VL-7B-Instruct",method=pdrop,budgets=0.4,layer_list="[7,14,21]",image_token_ratio_list="[0.3893,0.1516,0.0590]",use_flash_attention_2=true' \
+  --tasks mtcbench_image \
+  --batch_size 1 \
+  --device cuda:0 \
+  --output_path ./results/mtcbench_qwen2_vl_pdrop_b0.4
 ```
 
 To evaluate videos, replace `--tasks mtcbench_image` with `--tasks mtcbench_video`.
@@ -249,6 +269,7 @@ The third field is **optional** and is appended to `--model_args` verbatim. Exam
 METHODS=(
     # Token pruning — Qwen2-VL / Qwen2.5-VL (requires flash-attention)
     "fastv     fastv     use_flash_attention_2=true"
+    "pdrop     pdrop     layer_list='[7,14,21]',image_token_ratio_list='[0.3893,0.1516,0.0590]',use_flash_attention_2=true"
     "visionzip visionzip use_flash_attention_2=true"
     "prumerge+ prumerge+ use_flash_attention_2=true"
     "dart      dart      use_flash_attention_2=true"
