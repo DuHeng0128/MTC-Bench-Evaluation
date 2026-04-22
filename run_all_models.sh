@@ -1,8 +1,8 @@
 source ~/.bashrc
 source /root/miniconda3/bin/activate
-conda activate mtcbench-eval
+conda activate eval
 
-ROOT_DIR="/root/MTC-Bench-Evaluation/results"
+ROOT_DIR="/root/MTC-Bench-Evaluation/results_image"
 NUM_PROCESSES=4
 TASKS=("mtcbench_image")
 BUDGETS=(0.4)
@@ -11,10 +11,10 @@ BUDGETS=(0.4)
 # (1 + x + x^2 + x^3) / 4 = 0.4 -> x ~= 0.3893, so [7,14,21] -> [0.3893,0.1516,0.0590].
 
 export HF_ENDPOINT="https://hf-mirror.com"
-export CONDA_DEFAULT_ENV="mtcbench-eval"
+export CONDA_DEFAULT_ENV="eval"
 export PATH="/root/miniconda3/envs/mtcbench-eval/bin:$PATH"
-export OPENAI_API_URL="YOUR_OPENAI_API_URL"
-export OPENAI_API_KEY="YOUR_OPENAI_API_KEY"
+export OPENAI_API_URL="https://jeniya.top/v1"
+export OPENAI_API_KEY="sk-xmneEMPO2VMDXN71Nzz3V3KDnlyb9coOFBXIzrWKgtKV9aDg"
 export CUDA_VISIBLE_DEVICES="0,1,2,3"
 
 LAUNCH="python3 -m accelerate.commands.launch \
@@ -80,41 +80,41 @@ run_eval() {
 # ═══════════════════════════════════════════════════════════════════════════════
 # 1. Qwen2-VL-7B
 # ═══════════════════════════════════════════════════════════════════════════════
-METHODS_QWEN2VL=(
-    "fastv     fastv     use_flash_attention_2=true"
-    "pdrop     pdrop     layer_list=[7,14,21],image_token_ratio_list=[0.3893,0.1516,0.0590],use_flash_attention_2=true"
-    "visionzip visionzip use_flash_attention_2=true"
-    "prumerge+ prumerge+ use_flash_attention_2=true"
-    # "dart      dart      use_flash_attention_2=true"
-    # "h2o        head      head_adaptive=True,use_flash_attention_2=true"
-    # "snapkv     head      head_adaptive=True,pooling=avgpool,use_flash_attention_2=true"
-    # "pyramidkv  head      head_adaptive=True,pooling=avgpool,use_flash_attention_2=true"
-    # "look-m     merge     merge=True,use_flash_attention_2=true"
-    # "streamingllm streamingllm use_flash_attention_2=true"
-)
-run_eval "qwen2_vl_with_kvcache" \
-         "qwen2-vl" \
-         "Qwen/Qwen2-VL-7B-Instruct" \
-         METHODS_QWEN2VL
+# METHODS_QWEN2VL=(
+#     "fastv     fastv     use_flash_attention_2=true"
+#     "pdrop     pdrop     layer_list=[7,14,21],image_token_ratio_list=[0.3893,0.1516,0.0590],use_flash_attention_2=true"
+#     "visionzip visionzip use_flash_attention_2=true"
+#     "prumerge+ prumerge+ use_flash_attention_2=true"
+#     # "dart      dart      use_flash_attention_2=true"
+#     # "h2o        head      head_adaptive=True,use_flash_attention_2=true"
+#     # "snapkv     head      head_adaptive=True,pooling=avgpool,use_flash_attention_2=true"
+#     # "pyramidkv  head      head_adaptive=True,pooling=avgpool,use_flash_attention_2=true"
+#     # "look-m     merge     merge=True,use_flash_attention_2=true"
+#     # "streamingllm streamingllm use_flash_attention_2=true"
+# )
+# run_eval "qwen2_vl_with_kvcache" \
+#          "qwen2-vl" \
+#          "Qwen/Qwen2-VL-7B-Instruct" \
+#          METHODS_QWEN2VL
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 2. Qwen2.5-VL-7B
 # ═══════════════════════════════════════════════════════════════════════════════
-METHODS_QWEN25VL=(
-    "fastv     fastv     use_flash_attention_2=true"
-    "visionzip visionzip use_flash_attention_2=true"
-    "prumerge+ prumerge+ use_flash_attention_2=true"
-    # "dart      dart      use_flash_attention_2=true"
-    # "h2o        head      head_adaptive=True,use_flash_attention_2=true"
-    # "snapkv     head      head_adaptive=True,pooling=avgpool,use_flash_attention_2=true"
-    # "pyramidkv  head      head_adaptive=True,pooling=avgpool,use_flash_attention_2=true"
-    # "look-m     merge     merge=True,use_flash_attention_2=true"
-    # "streamingllm streamingllm use_flash_attention_2=true"
-)
-run_eval "qwen2_5_vl_with_kvcache" \
-         "qwen2_5-vl" \
-         "Qwen/Qwen2.5-VL-7B-Instruct" \
-         METHODS_QWEN25VL
+# METHODS_QWEN25VL=(
+#     "fastv     fastv     use_flash_attention_2=true"
+#     "visionzip visionzip use_flash_attention_2=true"
+#     "prumerge+ prumerge+ use_flash_attention_2=true"
+#     # "dart      dart      use_flash_attention_2=true"
+#     # "h2o        head      head_adaptive=True,use_flash_attention_2=true"
+#     # "snapkv     head      head_adaptive=True,pooling=avgpool,use_flash_attention_2=true"
+#     # "pyramidkv  head      head_adaptive=True,pooling=avgpool,use_flash_attention_2=true"
+#     # "look-m     merge     merge=True,use_flash_attention_2=true"
+#     # "streamingllm streamingllm use_flash_attention_2=true"
+# )
+# run_eval "qwen2_5_vl_with_kvcache" \
+#          "qwen2_5-vl" \
+#          "Qwen/Qwen2.5-VL-7B-Instruct" \
+#          METHODS_QWEN25VL
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 3. Qwen3-VL-8B
@@ -137,32 +137,32 @@ run_eval "qwen2_5_vl_with_kvcache" \
 # ═══════════════════════════════════════════════════════════════════════════════
 # 4. LLaVA-OneVision-7B
 # ═══════════════════════════════════════════════════════════════════════════════
-METHODS_LLAVA_OV=(
-    "fastv     fastv"
-    "visionzip visionzip"
-    "prumerge+ prumerge+"
-    # "dart      dart"
-    # "h2o        head      head_adaptive=True"
-    # "snapkv     head      head_adaptive=True,pooling=avgpool"
-    # "pyramidkv  head      head_adaptive=True,pooling=avgpool"
-    # "look-m     merge     merge=True"
-    # "streamingllm streamingllm"
-)
-run_eval "llava_onevision_with_kvcache" \
-         "llava-onevision" \
-         "/root/data2/shared/models/llava-onevision-qwen2-7b-ov" \
-         METHODS_LLAVA_OV
+# METHODS_LLAVA_OV=(
+#     "fastv     fastv"
+#     "visionzip visionzip"
+#     "prumerge+ prumerge+"
+#     # "dart      dart"
+#     # "h2o        head      head_adaptive=True"
+#     # "snapkv     head      head_adaptive=True,pooling=avgpool"
+#     # "pyramidkv  head      head_adaptive=True,pooling=avgpool"
+#     # "look-m     merge     merge=True"
+#     # "streamingllm streamingllm"
+# )
+# run_eval "llava_onevision_with_kvcache" \
+#          "llava-onevision" \
+#          "/root/data2/shared/models/llava-onevision-qwen2-7b-ov" \
+#          METHODS_LLAVA_OV
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 5. LLaVA-OneVision-1.5-8B
 # ═══════════════════════════════════════════════════════════════════════════════
 METHODS_LLAVA_OV15=(
-    "fastv     fastv"
+    # "fastv     fastv  attn_implementation=flash_attention_2"
     # Applies to both mtcbench_image and mtcbench_video in TASKS above.
-    "pdrop     pdrop     layer_list=[9,18,27],image_token_ratio_list=[0.3893,0.1516,0.0590]"
-    "visionzip visionzip"
-    "prumerge+ prumerge+"
-    # "dart      dart"
+    # "pdrop     pdrop     layer_list=[9,18,27],image_token_ratio_list=[0.3893,0.1516,0.0590]"
+    "visionzip visionzip  attn_implementation=flash_attention_2"
+    "prumerge+ prumerge+  attn_implementation=flash_attention_2"
+    "dart      dart  attn_implementation=flash_attention_2"
     # "h2o        head      head_adaptive=True"
     # "snapkv     head      head_adaptive=True,pooling=avgpool"
     # "pyramidkv  head      head_adaptive=True,pooling=avgpool"
@@ -177,21 +177,21 @@ run_eval "llava_onevision1_5_with_kvcache" \
 # ═══════════════════════════════════════════════════════════════════════════════
 # 6. InternVL3-8B
 # ═══════════════════════════════════════════════════════════════════════════════
-METHODS_INTERNVL3=(
-    "fastv     fastv     device_map=auto"
-    "visionzip visionzip device_map=auto"
-    "prumerge+ prumerge+ device_map=auto"
-    # "dart      dart      device_map=auto"
-    # "h2o        head      head_adaptive=True,device_map=auto"
-    # "snapkv     head      head_adaptive=True,pooling=avgpool,device_map=auto"
-    # "pyramidkv  head      head_adaptive=True,pooling=avgpool,device_map=auto"
-    # "look-m     merge     merge=True,device_map=auto"
-    # "streamingllm streamingllm device_map=auto"
-)
-run_eval "internvl3_with_kvcache" \
-         "internvl3" \
-         "OpenGVLab/InternVL3-8B" \
-         METHODS_INTERNVL3
+# METHODS_INTERNVL3=(
+#     "fastv     fastv     device_map=auto"
+#     "visionzip visionzip device_map=auto"
+#     "prumerge+ prumerge+ device_map=auto"
+#     # "dart      dart      device_map=auto"
+#     # "h2o        head      head_adaptive=True,device_map=auto"
+#     # "snapkv     head      head_adaptive=True,pooling=avgpool,device_map=auto"
+#     # "pyramidkv  head      head_adaptive=True,pooling=avgpool,device_map=auto"
+#     # "look-m     merge     merge=True,device_map=auto"
+#     # "streamingllm streamingllm device_map=auto"
+# )
+# run_eval "internvl3_with_kvcache" \
+#          "internvl3" \
+#          "OpenGVLab/InternVL3-8B" \
+#          METHODS_INTERNVL3
 
 echo "========================================================"
 echo "All evaluations completed: $(date '+%Y-%m-%d %H:%M:%S')"

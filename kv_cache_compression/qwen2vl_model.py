@@ -2285,6 +2285,95 @@ def qwen2vl_generation_forward_prumerge_plus(
 # DART — Duplication-Aware Reduction of Tokens
 # ===========================================================================
 
+def get_retained_visual_positions_dart(
+    last_layer_state: torch.Tensor,
+    k_states: torch.Tensor,
+    visual_positions: torch.LongTensor,
+    budgets: float,
+    pivot_image_token: int = 4,
+    pivot_text_token: int = 4,
+) -> torch.Tensor:
+    """Core DART algorithm for arbitrary visual token positions.
+
+    Args:
+        last_layer_state: normed hidden states from layer K-1, shape [batch, seq, hidden]
+        k_states: key states from layer K-1, shape [batch, num_heads, seq, head_dim]
+        visual_positions: absolute visual token indices in sequence (can be disjoint)
+        budgets: fraction of visual tokens to KEEP (MTC-Bench convention)
+        pivot_image_token: number of anchor visual tokens (by L1 norm)
+        pivot_text_token: number of anchor text tokens (by L1 norm)
+
+    Returns:
+        Sorted tensor of retained visual token indices (absolute positions in sequence)
+    """
+    device = last_layer_state.device
+    visual_positions = visual_positions.to(device=device, dtype=torch.long).unique(sorted=True)
+
+    if visual_positions.numel() == 0:
+        raise RuntimeError("DART requires visual positions, but none were provided.")
+
+    n_visual = int(visual_positions.numel())
+    n_keep = max(1, int(n_visual * budgets))
+    n_keep = min(n_keep, n_visual)
+
+    # Reshape k_states: [batch, heads, seq, dim] -> [batch, seq, heads*dim]
+    k_flat = k_states.permute(0, 2, 1, 3).reshape(k_states.shape[0], k_states.shape[2], -1)
+
+    # Select visual pivots by L1 norm.
+    k_visual = k_flat[0][visual_positions, :]
+    visual_l1 = torch.norm(k_visual, p=1, dim=-1)
+    n_pivot_img = min(pivot_image_token, n_visual)
+    visual_pivot_positions = visual_positions[visual_l1.topk(n_pivot_img).indices]
+
+    # Select text pivots from all non-visual token positions.
+    seq_len = k_flat.shape[1]
+    all_positions = torch.arange(seq_len, device=device)
+    text_mask = torch.ones(seq_len, device=device, dtype=torch.bool)
+    text_mask[visual_positions] = False
+    text_positions = all_positions[text_mask]
+
+    if text_positions.numel() > 0:
+        k_text = k_flat[0][text_positions, :]
+        text_l1 = torch.norm(k_text, p=1, dim=-1)
+        n_pivot_txt = min(pivot_text_token, int(text_positions.numel()))
+        text_pivot_positions = text_positions[text_l1.topk(n_pivot_txt).indices]
+    else:
+        text_pivot_positions = torch.empty(0, device=device, dtype=torch.long)
+
+    if text_pivot_positions.numel() > 0:
+        pivot_positions = torch.cat([visual_pivot_positions, text_pivot_positions])
+    else:
+        pivot_positions = visual_pivot_positions
+
+    retained = visual_pivot_positions.unique(sorted=True)
+    if retained.numel() >= n_keep:
+        return retained[:n_keep]
+
+    # Global visual pool competition for remaining budget.
+    remaining_mask = torch.ones(n_visual, device=device, dtype=torch.bool)
+    retained_idx_in_visual = torch.searchsorted(visual_positions, retained)
+    remaining_mask[retained_idx_in_visual] = False
+    remaining_visual = visual_positions[remaining_mask]
+
+    need = n_keep - int(retained.numel())
+    if need <= 0 or remaining_visual.numel() == 0:
+        return retained
+
+    pivot_vectors = last_layer_state[0][pivot_positions, :]
+    candidate_vectors = last_layer_state[0][remaining_visual, :]
+    cos = F.cosine_similarity(
+        candidate_vectors.unsqueeze(1),
+        pivot_vectors.unsqueeze(0),
+        dim=-1,
+    )
+    # Keep existing DART polarity: larger -cos means stronger retention priority.
+    candidate_scores = (-cos).max(dim=1).values
+
+    chosen = remaining_visual[candidate_scores.topk(min(need, remaining_visual.numel())).indices]
+    retained = torch.cat([retained, chosen]).unique(sorted=True)
+    return retained
+
+
 def get_retained_image_token_dart(
     last_layer_state: torch.Tensor,
     k_states: torch.Tensor,
@@ -2294,68 +2383,21 @@ def get_retained_image_token_dart(
     pivot_image_token: int = 4,
     pivot_text_token: int = 4,
 ) -> torch.Tensor:
-    """Core DART algorithm: select retained image tokens via duplication-aware scoring.
-
-    Args:
-        last_layer_state: normed hidden states from layer K-1, shape [batch, seq, hidden]
-        k_states: key states from layer K-1, shape [batch, num_heads, seq, head_dim]
-        image_token_start_index: index of first image token in the sequence
-        image_token_length: number of image tokens
-        budgets: fraction of image tokens to KEEP (MTC-Bench convention)
-        pivot_image_token: number of anchor image tokens (by L1 norm)
-        pivot_text_token: number of anchor text tokens (by L1 norm)
-
-    Returns:
-        Tensor of retained image token indices (absolute positions in sequence)
-    """
-    device = last_layer_state.device
-    TOKEN_TOPK = int(image_token_length * budgets / (pivot_image_token + pivot_text_token))
-    TOKEN_TOPK = max(1, TOKEN_TOPK)
-
-    # Reshape k_states: [batch, heads, seq, dim] -> [batch, seq, heads*dim]
-    k_flat = k_states.permute(0, 2, 1, 3).reshape(k_states.shape[0], k_states.shape[2], -1)
-
-    k_image = k_flat[0][image_token_start_index:image_token_start_index + image_token_length, :]
-    k_query = k_flat[0][image_token_start_index + image_token_length:, :]
-
-    # L1 norm ranking — select pivot tokens
-    image_l1 = torch.norm(k_image, p=1, dim=-1)
-    query_l1 = torch.norm(k_query, p=1, dim=-1)
-
-    n_pivot_img = min(pivot_image_token, image_l1.shape[0])
-    n_pivot_txt = min(pivot_text_token, query_l1.shape[0]) if query_l1.shape[0] > 0 else 0
-
-    image_indices = (image_l1.topk(n_pivot_img).indices + image_token_start_index).tolist()
-    if n_pivot_txt > 0:
-        query_indices = (query_l1.topk(n_pivot_txt).indices + image_token_start_index + image_token_length).tolist()
-    else:
-        query_indices = []
-
-    indices_set = set(image_indices + query_indices)
-
-    # Pool of remaining image tokens eligible for similarity expansion
-    valid_indices = set(range(image_token_start_index, image_token_start_index + image_token_length)) - set(image_indices)
-    valid_indices_list = list(valid_indices)
-
-    # For each pivot, find TOKEN_TOPK most similar remaining image tokens
-    for item in list(indices_set):
-        if len(valid_indices_list) == 0 or TOKEN_TOPK <= 0:
-            break
-        valid_vectors = last_layer_state[0][valid_indices_list, :]
-        cos_sim = -F.cosine_similarity(last_layer_state[0][item, :], valid_vectors, dim=-1)
-        k = min(TOKEN_TOPK, cos_sim.shape[0])
-        top_k_indices = cos_sim.topk(k).indices
-
-        top_k_real = [valid_indices_list[i] for i in top_k_indices]
-        indices_set.update(top_k_real)
-
-        valid_indices.difference_update(top_k_real)
-        valid_indices_list = list(valid_indices)
-
-    # Remove query indices — only keep image tokens
-    indices_set.difference_update(query_indices)
-
-    return torch.tensor(list(indices_set), device=device)
+    """Backward-compatible DART entrypoint for a single contiguous visual span."""
+    visual_positions = torch.arange(
+        image_token_start_index,
+        image_token_start_index + image_token_length,
+        device=last_layer_state.device,
+        dtype=torch.long,
+    )
+    return get_retained_visual_positions_dart(
+        last_layer_state=last_layer_state,
+        k_states=k_states,
+        visual_positions=visual_positions,
+        budgets=budgets,
+        pivot_image_token=pivot_image_token,
+        pivot_text_token=pivot_text_token,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2523,30 +2565,30 @@ def qwen_vl_model_forward_dart(
             assert last_k_states is not None, "last_k_states is None at DART target layer"
 
             text_image_mask = self.text_image_mask[0]
-            image_positions = (text_image_mask == False).nonzero(as_tuple=True)[0]
-            assert len(image_positions) > 0, "No image tokens found; DART requires an image"
-            image_start = int(image_positions[0])
-            image_end = int(image_positions[-1])
-            image_length = image_end - image_start + 1
+            visual_positions = (~text_image_mask).nonzero(as_tuple=True)[0]
+            assert len(visual_positions) > 0, "No image tokens found; DART requires an image"
 
-            device = hidden_states.device
             last_layer_state = self.norm(hidden_states)
-
-            retained = get_retained_image_token_dart(
-                last_layer_state, last_k_states,
-                image_start, image_length,
-                self.budgets, self.pivot_image_token, self.pivot_text_token,
+            retained_visual = get_retained_visual_positions_dart(
+                last_layer_state=last_layer_state,
+                k_states=last_k_states,
+                visual_positions=visual_positions,
+                budgets=self.budgets,
+                pivot_image_token=self.pivot_image_token,
+                pivot_text_token=self.pivot_text_token,
             )
 
-            keep_indexs = torch.cat((
-                torch.arange(image_start, device=device),
-                retained.to(device),
-                torch.arange(image_start + image_length, seq_length, device=device),
-            )).sort().values
+            text_positions = text_image_mask.nonzero(as_tuple=True)[0]
+            keep_indexs = torch.cat(
+                [
+                    text_positions,
+                    retained_visual.to(hidden_states.device),
+                ]
+            ).sort().values
 
             hidden_states = hidden_states[:, keep_indexs, :]
             if causal_mask is not None:
-                causal_mask = causal_mask[:, :, :hidden_states.shape[1], :hidden_states.shape[1]]
+                causal_mask = causal_mask[:, :, keep_indexs, :][:, :, :, keep_indexs]
             position_ids = position_ids[:, :, keep_indexs]
             position_embeddings = self.rotary_emb(hidden_states, position_ids)
 

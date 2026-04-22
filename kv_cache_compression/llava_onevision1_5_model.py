@@ -18,7 +18,7 @@ import torch.nn.functional as F
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.modeling_outputs import BaseModelOutputWithPast
 
-from .qwen2vl_model import get_retained_image_token_dart
+from .qwen2vl_model import get_retained_visual_positions_dart
 from .siglip_model import complement_idx_prumerge_plus, outlier_dectection_prumerge_plus
 
 TEXT_ATTENTION_FAMILY = {
@@ -177,20 +177,6 @@ def _require_visual_positions(
             f"{method} requires image or video tokens in the prompt; none were found."
         )
     return visual_positions
-
-
-def _require_contiguous_visual_span(
-    visual_positions: torch.LongTensor,
-    method: str,
-) -> Tuple[int, int]:
-    start = int(visual_positions[0])
-    length = int(visual_positions.numel())
-    if int(visual_positions[-1]) - start + 1 != length:
-        raise RuntimeError(
-            f"{method} currently requires a single contiguous vision token span in "
-            "the prompt."
-        )
-    return start, length
 
 
 def _slice_prefill_attention_mask(
@@ -485,7 +471,6 @@ def _dart_keep_indices(
 ) -> torch.LongTensor:
     text_image_mask = getattr(text_model, "text_image_mask", None)
     visual_positions = _require_visual_positions(text_image_mask, "DART")
-    image_start, image_length = _require_contiguous_visual_span(visual_positions, "DART")
     last_k_states = text_model.layers[text_model.target_layer_idx - 1].self_attn.last_k_states
     if last_k_states is None:
         raise RuntimeError("DART expected last_k_states at layer K-1, but they were missing.")
@@ -493,19 +478,18 @@ def _dart_keep_indices(
         raise RuntimeError("DART currently supports only batch_size=1 for LLaVA-OV-1.5.")
 
     last_layer_state = text_model.norm(hidden_states)
-    retained = get_retained_image_token_dart(
-        last_layer_state,
-        last_k_states,
-        image_start,
-        image_length,
-        text_model.budgets,
-        text_model.pivot_image_token,
-        text_model.pivot_text_token,
+    retained_visual = get_retained_visual_positions_dart(
+        last_layer_state=last_layer_state,
+        k_states=last_k_states,
+        visual_positions=visual_positions,
+        budgets=text_model.budgets,
+        pivot_image_token=text_model.pivot_image_token,
+        pivot_text_token=text_model.pivot_text_token,
     )
     keep_indices = torch.cat(
         [
             torch.where(text_image_mask[0])[0],
-            retained.to(hidden_states.device),
+            retained_visual.to(hidden_states.device),
         ]
     ).sort().values
     return keep_indices
