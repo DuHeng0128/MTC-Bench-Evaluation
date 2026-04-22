@@ -1,7 +1,7 @@
 metadata:
   version: 0.0
   sys_prompt: "There are several options:"
-  gpt_eval_model_name: "gpt-3.5-turbo"
+  gpt_eval_model_name: "gpt-3.5-turbo-1106"
 group: mtcbench_image
 task: "mmbench_en_test_mtcbench"
 test_split: test

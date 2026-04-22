@@ -7,6 +7,11 @@ __pycache__
 # Large files
 *.whl
 results/
+results_image/
+results_video/
+old-results/
+algorithm_analysis.md
+FIX_ATTN.md
 dist
 datasets/*
 # Log

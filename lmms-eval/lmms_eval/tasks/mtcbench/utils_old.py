@@ -1770,7 +1770,7 @@ def get_eval(question, answer, pred, max_tokens: int, retries: int = 5):
         try:
             response = client.chat.completions.create(**create_kwargs)
             # Keep original behavior: return non-empty content ASAP
-            content = (response.choices[0].message.content or "").strip()
+            content = _chat_completion_content(response)
             if content != "":
                 # Keep original second return as "response_data['model']"
                 # SDK response may expose .model; otherwise fall back.
@@ -4143,6 +4143,31 @@ def _load_json_payload(text: str):
             return None
 
 
+def _chat_completion_content(response: Any) -> str:
+    if isinstance(response, str):
+        return response.strip()
+
+    choices = getattr(response, "choices", None)
+    if isinstance(choices, list) and choices:
+        message = getattr(choices[0], "message", None)
+        content = getattr(message, "content", "")
+        if content is None:
+            return ""
+        if isinstance(content, list):
+            text_chunks = []
+            for item in content:
+                if isinstance(item, dict):
+                    text = item.get("text")
+                else:
+                    text = getattr(item, "text", None)
+                if isinstance(text, str):
+                    text_chunks.append(text)
+            return "".join(text_chunks).strip()
+        return str(content).strip()
+
+    return str(response).strip()
+
+
 # -------------------- DREAM-1K (captioning) --------------------
 with open(Path(__file__).parent / "dream1k.yaml", "r") as f:
     raw_data = f.readlines()
@@ -4216,7 +4241,7 @@ def _dream1k_extract_events(caption: str, model: str, retries: int = 5) -> List[
                 temperature=0,
                 max_tokens=512,
             )
-            content = (response.choices[0].message.content or "").strip()
+            content = _chat_completion_content(response)
             data = _load_json_payload(content)
             if isinstance(data, dict) and isinstance(data.get("events"), list):
                 events = [str(e).strip() for e in data["events"] if str(e).strip()]
@@ -4255,7 +4280,7 @@ def _dream1k_score_events(events: List[str], description: str, model: str, retri
                 temperature=0,
                 max_tokens=512,
             )
-            content = (response.choices[0].message.content or "").strip()
+            content = _chat_completion_content(response)
             data = _load_json_payload(content)
             if isinstance(data, dict) and isinstance(data.get("events"), list):
                 matched = 0
@@ -4401,7 +4426,7 @@ def _capsbench_call_judge(caption: str, questions: List[Dict[str, Any]], model: 
                 temperature=0,
                 max_tokens=512,
             )
-            content = (response.choices[0].message.content or "").strip()
+            content = _chat_completion_content(response)
             answers = _capsbench_parse_answers(content, len(questions))
             return answers
         except Exception as e:

@@ -23,13 +23,18 @@ def load_video_decord(video_path, max_frames_num):
 
 # This one is faster
 def record_video_length_stream(container, indices):
+    if len(indices) == 0:
+        return []
+
     frames = []
-    start_index = indices[0]
-    end_index = indices[-1]
+    start_index = int(indices[0])
+    end_index = int(indices[-1])
+    target_indices = {int(index) for index in indices}
+
     for i, frame in enumerate(container.decode(video=0)):
         if i > end_index:
             break
-        if i >= start_index and i in indices:
+        if i >= start_index and i in target_indices:
             frames.append(frame)
     return frames
 
@@ -46,22 +51,37 @@ def record_video_length_packet(container):
     return frames
 
 
-def load_video_stream(container, num_frm: int = 8, fps: float = None, force_include_last_frame=False):
+def load_video_stream(
+    container, num_frm: int = 8, fps: float = None, force_include_last_frame=False
+):
     # container = av.open(video_path)
     total_frames = container.streams.video[0].frames
     frame_rate = container.streams.video[0].average_rate
+
+    if total_frames <= 0:
+        return []
+
     if fps is not None:
         video_length = total_frames / frame_rate
         num_frm = min(num_frm, int(video_length * fps))
-    sampled_frm = min(total_frames, num_frm)
-    indices = np.linspace(0, total_frames - 1, sampled_frm, dtype=int)
-    if force_include_last_frame:
-        last_frame = total_frames - 1
-        if last_frame not in indices:
-            indices = np.linspace(0, total_frames - 2, sampled_frm - 1, dtype=int)
-            indices = np.append(indices, last_frame)
 
-    return record_video_length_stream(container, indices)
+    sampled_frm = max(1, min(total_frames, num_frm))
+
+    if sampled_frm == 1:
+        indices = np.array([0], dtype=int)
+    else:
+        indices = np.linspace(
+            0,
+            total_frames - 1,
+            sampled_frm,
+            dtype=int,
+            endpoint=force_include_last_frame,
+        )
+
+    if force_include_last_frame and sampled_frm > 1:
+        indices[-1] = total_frames - 1
+
+    return record_video_length_stream(container, np.unique(indices))
 
 
 def load_video_packet(container, num_frm: int = 8, fps: float = None):
@@ -88,6 +108,7 @@ def read_video_pyav(
     fps: float = None,
     format="rgb24",
     force_include_last_frame=False,
+    fallback_to_packet: bool = True,
 ) -> np.ndarray:
     """
     Read video using the PyAV library.
@@ -105,19 +126,21 @@ def read_video_pyav(
     container = av.open(video_path)
 
     try:
-        if "webm" not in video_path and "mkv" not in video_path:
-            # For mp4, we try loading with stream first
-            try:
-                frames = load_video_stream(
-                    container,
-                    num_frm,
-                    fps,
-                    force_include_last_frame=force_include_last_frame,
-                )
-            except Exception:
-                frames = record_video_length_packet(container)
-        else:
-            frames = record_video_length_packet(container)
+        try:
+            frames = load_video_stream(
+                container,
+                num_frm,
+                fps,
+                force_include_last_frame=force_include_last_frame,
+            )
+        except Exception:
+            frames = []
+
+        if fallback_to_packet and not frames:
+            frames = load_video_packet(container, num_frm=num_frm, fps=fps)
+
+        if not frames:
+            return np.empty((0, 0, 0, 3), dtype=np.uint8)
 
         return np.stack([x.to_ndarray(format=format) for x in frames])
     finally:
@@ -167,9 +190,14 @@ def read_video_pyav_base64(
     img_format="PNG",
     max_image_size: Optional[Union[Tuple[int, int], int]] = None,
     resize_strategy: str = "resize",
+    return_data_urls: bool = False,
 ):
     frames = read_video_pyav(video_path, num_frm=num_frm, fps=fps, format=format)
+    if frames.size == 0:
+        return []
+
     base64_frames = []
+    image_mime_type = Image.MIME.get(img_format.upper(), f"image/{img_format.lower()}")
     for frame in frames:
         img = Image.fromarray(frame)
         if max_image_size:
@@ -185,5 +213,8 @@ def read_video_pyav_base64(
         img.save(output_buffer, format=img_format)
         byte_data = output_buffer.getvalue()
         base64_str = base64.b64encode(byte_data).decode("utf-8")
-        base64_frames.append(base64_str)
+        if return_data_urls:
+            base64_frames.append(f"data:{image_mime_type};base64,{base64_str}")
+        else:
+            base64_frames.append(base64_str)
     return base64_frames

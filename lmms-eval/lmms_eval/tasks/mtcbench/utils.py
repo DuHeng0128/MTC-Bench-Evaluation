@@ -65,6 +65,16 @@ elif API_TYPE == "azure":
         "Content-Type": "application/json",
     }
 client = OpenAI(base_url=API_URL, api_key=API_KEY, timeout=30.0)
+DEFAULT_GPT_EVAL_MODEL = "gpt-3.5-turbo-1106"
+
+
+def _get_gpt_eval_model(task_config: Dict[str, Any]) -> str:
+    metadata = task_config.get("metadata", {}) if isinstance(task_config, dict) else {}
+    model_name = metadata.get("gpt_eval_model_name") if isinstance(metadata, dict) else None
+    if isinstance(model_name, str) and model_name.strip():
+        return model_name.strip()
+    return DEFAULT_GPT_EVAL_MODEL
+
 
 with open(Path(__file__).parent / "gqa_lite.yaml", "r") as f:
     raw_data = f.readlines()
@@ -587,7 +597,7 @@ with open(Path(__file__).parent / "mathvista_test.yaml", "r") as f:
 
     mathvista_config = yaml.safe_load("".join(safe_data))
 
-mathvista_evaluator = MathVistaEvaluator(api_key=API_KEY, gpt_model=mathvista_config["metadata"]["gpt_eval_model_name"])
+mathvista_evaluator = MathVistaEvaluator(api_key=API_KEY, gpt_model=_get_gpt_eval_model(mathvista_config))
 
 def mathvista_doc_to_visual(doc):
     image_bytes = doc["decoded_image"]["bytes"]
@@ -1172,7 +1182,7 @@ with open(Path(__file__).parent / "mmbench_en.yaml", "r") as f:
 
     mmbench_config = yaml.safe_load("".join(safe_data))
 
-GPT_EVAL_MODEL_NAME = mmbench_config["metadata"]["gpt_eval_model_name"]
+GPT_EVAL_MODEL_NAME = _get_gpt_eval_model(mmbench_config)
 mmbench_evaluator = MMBench_Evaluator(sys_prompt=mmbench_config["metadata"]["sys_prompt"], API_KEY=API_KEY, API_URL=API_URL, model_version=GPT_EVAL_MODEL_NAME)
 
 
@@ -1764,7 +1774,7 @@ def get_eval(question, answer, pred, max_tokens: int, retries: int = 5):
 
     # Keep behavior aligned with the original: fixed temperature=0, respect max_tokens
     create_kwargs = {
-        "model": activitynetqa_config["metadata"]["gpt_eval_model_name"],
+        "model": _get_gpt_eval_model(activitynetqa_config),
         "messages": messages,
         "temperature": 0,
         "max_tokens": max_tokens,
@@ -1775,11 +1785,11 @@ def get_eval(question, answer, pred, max_tokens: int, retries: int = 5):
         try:
             response = client.chat.completions.create(**create_kwargs)
             # Keep original behavior: return non-empty content ASAP
-            content = (response.choices[0].message.content or "").strip()
+            content = _chat_completion_content(response)
             if content != "":
                 # Keep original second return as "response_data['model']"
                 # SDK response may expose .model; otherwise fall back.
-                used_model = getattr(response, "model", activitynetqa_config["metadata"]["gpt_eval_model_name"])
+                used_model = getattr(response, "model", _get_gpt_eval_model(activitynetqa_config))
                 return content, used_model
 
         except Exception as e:
@@ -2212,11 +2222,36 @@ with open(Path(__file__).parent / "tempcompass_yes_no.yaml", "r") as f:
         if "!function" not in line:
             safe_data.append(line)
 
-    tempcompass_config = yaml.safe_load("".join(safe_data))
+    tempcompass_yes_no_config = yaml.safe_load("".join(safe_data))
+
+with open(Path(__file__).parent / "tempcompass_captioning.yaml", "r") as f:
+    raw_data = f.readlines()
+    safe_data = []
+    for i, line in enumerate(raw_data):
+        if "!function" not in line:
+            safe_data.append(line)
+    tempcompass_captioning_config = yaml.safe_load("".join(safe_data))
+
+with open(Path(__file__).parent / "tempcompass_caption_matching.yaml", "r") as f:
+    raw_data = f.readlines()
+    safe_data = []
+    for i, line in enumerate(raw_data):
+        if "!function" not in line:
+            safe_data.append(line)
+    tempcompass_caption_matching_config = yaml.safe_load("".join(safe_data))
+
+with open(Path(__file__).parent / "tempcompass_mc.yaml", "r") as f:
+    raw_data = f.readlines()
+    safe_data = []
+    for i, line in enumerate(raw_data):
+        if "!function" not in line:
+            safe_data.append(line)
+    tempcompass_mc_config = yaml.safe_load("".join(safe_data))
+
 # We will unzip all the zip files
 # To HF HOME cache dir
 # And load it here
-cache_dir_tempcompass = tempcompass_config["dataset_path"]
+cache_dir_tempcompass = tempcompass_yes_no_config["dataset_path"]
 cache_dir_tempcompass = os.path.join(cache_dir_tempcompass, "videos")
 
 # Pass in video path here
@@ -2318,7 +2353,10 @@ def tempcompass_process_results_multi_choice(doc, result):
         If the prediction is correct, respond "Correct". If the prediction is incorrect, respond "Incorrect".
         """
         prompt = f"""{base_prompt}\nMulti-Choice Question:\n{doc["question"]}\nGround-Truth Answer: {doc["answer"]}\nModel Prediction: {pred}"""
-        chatgpt_response, rating = get_eval_result(prompt)
+        chatgpt_response, rating = get_eval_result(
+            prompt,
+            model=_get_gpt_eval_model(tempcompass_mc_config),
+        )
 
     if chatgpt_response:
         return {
@@ -2371,7 +2409,10 @@ def tempcompass_process_results_yes_no(doc, result):
         If the prediction is correct, respond "Correct". If the prediction is incorrect, respond "Incorrect".
         """
         prompt = f"""{base_prompt}\nYes/No Question:\n{doc["question"]}\nGround-Truth Answer: {doc["answer"]}\nModel Prediction: {pred}"""
-        chatgpt_response, rating = get_eval_result(prompt)
+        chatgpt_response, rating = get_eval_result(
+            prompt,
+            model=_get_gpt_eval_model(tempcompass_yes_no_config),
+        )
 
     if chatgpt_response:
         return {
@@ -2424,7 +2465,10 @@ def tempcompass_process_results_caption_matching(doc, result):
         If the prediction is correct, respond "Correct". If the prediction is incorrect, respond "Incorrect".
         """
         prompt = f"""{base_prompt}\nCaption Matching Question:\n{doc["question"]}\nGround-Truth Answer: {doc["answer"]}\nModel Prediction: {pred}"""
-        chatgpt_response, rating = get_eval_result(prompt)
+        chatgpt_response, rating = get_eval_result(
+            prompt,
+            model=_get_gpt_eval_model(tempcompass_caption_matching_config),
+        )
 
     if chatgpt_response:
         return {
@@ -2504,7 +2548,11 @@ def tempcompass_process_results_captioning(doc, result):
     """
 
     prompt = f"""{caption_evaluation_prompt}\nVideo Description:{pred}\nMulti-Choice Question:\n{doc["mc_question"]}\nAnswer:"""
-    eval_result = get_eval_result_for_captioning(prompt, mc_answer=doc["mc_answer"])
+    eval_result = get_eval_result_for_captioning(
+        prompt,
+        mc_answer=doc["mc_answer"],
+        model=_get_gpt_eval_model(tempcompass_captioning_config),
+    )
 
     return {
         "avg_accuracy": {
@@ -2561,7 +2609,7 @@ def parse_llm_output_for_captioning(llm_output, gt_answer):
         eval_result["rating"] = 0
     return eval_result
 
-def get_llm_output_for_captioning(prompt):
+def get_llm_output_for_captioning(prompt, model):
     messages = [
         {"role": "system", "content": "You are an AI assistant for question answering."},
         {"role": "user", "content": prompt},
@@ -2569,7 +2617,7 @@ def get_llm_output_for_captioning(prompt):
 
     try:
         response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
+            model=model,
             messages=messages,
             temperature=1.0,
             max_tokens=128,
@@ -2577,7 +2625,7 @@ def get_llm_output_for_captioning(prompt):
             presence_penalty=1,
         )
 
-        llm_output = (response.choices[0].message.content or "").strip()
+        llm_output = _chat_completion_content(response)
 
         if getattr(response, "usage", None) is not None:
             token_count = {
@@ -2609,10 +2657,10 @@ def get_llm_output_for_captioning(prompt):
 
 
 # utils functions for captioning: consolidate and return gpt outputs
-def get_eval_result_for_captioning(prompt, mc_answer, maxtry=10):
+def get_eval_result_for_captioning(prompt, mc_answer, model, maxtry=10):
     while True:
         try:
-            llm_output, token_count = get_llm_output_for_captioning(prompt)
+            llm_output, token_count = get_llm_output_for_captioning(prompt, model)
             eval_result = parse_llm_output_for_captioning(llm_output, gt_answer=mc_answer)
             eval_result["token_count"] = token_count
             return eval_result
@@ -2662,11 +2710,11 @@ def extract_pred(video_llm_output):
 
 
 # utils function for gpt_evaluation when rule-based matching is unsuccessful
-def get_eval_result(prompt, maxtry=10, sys_prompt=None):
+def get_eval_result(prompt, model, maxtry=10, sys_prompt=None):
     llm_output = None
     while True:
         try:
-            llm_output = get_llm_output(prompt, sys_prompt)
+            llm_output = get_llm_output(prompt, model, sys_prompt)
             rating = llm_output_to_rating(llm_output)
             return llm_output, rating
         except Exception as e:
@@ -2679,7 +2727,7 @@ def get_eval_result(prompt, maxtry=10, sys_prompt=None):
 
 
 # utils function for gpt evaluation
-def get_llm_output(prompt, sys_prompt=None, max_tokens=128):
+def get_llm_output(prompt, model, sys_prompt=None, max_tokens=128):
     if sys_prompt is None:
         sys_prompt = "You are an AI assistant for question answering."
 
@@ -2689,14 +2737,14 @@ def get_llm_output(prompt, sys_prompt=None, max_tokens=128):
     ]
 
     response = client.chat.completions.create(
-        model="gpt-3.5-turbo-1106",
+        model=model,
         messages=messages,
         temperature=1.0,
         max_tokens=max_tokens,
         top_p=1,
         presence_penalty=1,
     )
-    llm_output = (response.choices[0].message.content or "").strip()
+    llm_output = _chat_completion_content(response)
     return llm_output
 
 # utils function that converts gpt evaluation into rating
@@ -3178,7 +3226,7 @@ with open(Path(__file__).parent / "hr_bench.yaml", "r") as f:
 
     hrbench_config = yaml.safe_load("".join(safe_data))
 
-hrbench_evaluator = HRBenchEval(api_key=os.getenv("OPENAI_API_KEY", "API_KEY"), gpt_model=os.getenv("MODEL_VERSION", hrbench_config["metadata"]["gpt_eval_model_name"]), max_workers=hrbench_config["metadata"]["max_workers"])
+hrbench_evaluator = HRBenchEval(api_key=os.getenv("OPENAI_API_KEY", "API_KEY"), gpt_model=_get_gpt_eval_model(hrbench_config), max_workers=hrbench_config["metadata"]["max_workers"])
 
 
 def decode_base64_to_image(base64_string, target_size=-1):
@@ -3622,7 +3670,8 @@ with open(Path(__file__).parent / "mmvu_val.yaml", "r") as f:
         # remove function definition since yaml load cannot handle it
         if "!function" not in line:
             safe_data_val.append(line)
-cache_dir_val = yaml.safe_load("".join(safe_data_val))["dataset_path"]
+mmvu_config = yaml.safe_load("".join(safe_data_val))
+cache_dir_val = mmvu_config["dataset_path"]
 
 def mmvu_doc_to_visual_val(doc):
     video_path = doc["video"]
@@ -3862,7 +3911,7 @@ def evaluate_with_llm_judge(doc: Dict[str, Any], prediction: str) -> Tuple[bool,
         return False, "rule-based"
 
     try:
-        MODEL_VERSION = os.getenv("MODEL_VERSION", "gpt-3.5-turbo")
+        model_version = _get_gpt_eval_model(mmvu_config)
 
         formatted_question = construct_question_prompt(doc)
         full_answer = str(doc.get("answer", ""))
@@ -3889,7 +3938,7 @@ def evaluate_with_llm_judge(doc: Dict[str, Any], prediction: str) -> Tuple[bool,
         )
 
         response = client.chat.completions.create(
-            model=MODEL_VERSION,
+            model=model_version,
             messages=[
                 {"role": "system", "content": custom_prompt},
                 {"role": "user", "content": user_content},
@@ -4148,6 +4197,31 @@ def _load_json_payload(text: str):
             return None
 
 
+def _chat_completion_content(response: Any) -> str:
+    if isinstance(response, str):
+        return response.strip()
+
+    choices = getattr(response, "choices", None)
+    if isinstance(choices, list) and choices:
+        message = getattr(choices[0], "message", None)
+        content = getattr(message, "content", "")
+        if content is None:
+            return ""
+        if isinstance(content, list):
+            text_chunks = []
+            for item in content:
+                if isinstance(item, dict):
+                    text = item.get("text")
+                else:
+                    text = getattr(item, "text", None)
+                if isinstance(text, str):
+                    text_chunks.append(text)
+            return "".join(text_chunks).strip()
+        return str(content).strip()
+
+    return str(response).strip()
+
+
 # -------------------- DREAM-1K (captioning) --------------------
 with open(Path(__file__).parent / "dream1k.yaml", "r") as f:
     raw_data = f.readlines()
@@ -4160,12 +4234,7 @@ dream1k_dataset_dir = dream1k_config["dataset_path"]
 
 
 def _dream1k_get_eval_model(lmms_eval_specific_kwargs=None) -> str:
-    if lmms_eval_specific_kwargs and "gpt_eval_model_name" in lmms_eval_specific_kwargs:
-        return lmms_eval_specific_kwargs["gpt_eval_model_name"]
-    return os.getenv(
-        "DREAM1K_EVAL_MODEL",
-        dream1k_config.get("metadata", {}).get("gpt_eval_model_name", "gpt-4o-mini"),
-    )
+    return _get_gpt_eval_model(dream1k_config)
 
 
 def dream1k_doc_to_visual(doc):
@@ -4221,7 +4290,7 @@ def _dream1k_extract_events(caption: str, model: str, retries: int = 5) -> List[
                 temperature=0,
                 max_tokens=512,
             )
-            content = (response.choices[0].message.content or "").strip()
+            content = _chat_completion_content(response)
             data = _load_json_payload(content)
             if isinstance(data, dict) and isinstance(data.get("events"), list):
                 events = [str(e).strip() for e in data["events"] if str(e).strip()]
@@ -4260,7 +4329,7 @@ def _dream1k_score_events(events: List[str], description: str, model: str, retri
                 temperature=0,
                 max_tokens=512,
             )
-            content = (response.choices[0].message.content or "").strip()
+            content = _chat_completion_content(response)
             data = _load_json_payload(content)
             if isinstance(data, dict) and isinstance(data.get("events"), list):
                 matched = 0
@@ -4335,12 +4404,7 @@ capsbench_config = yaml.safe_load("".join(safe_data))
 
 
 def _capsbench_get_eval_model(lmms_eval_specific_kwargs=None) -> str:
-    if lmms_eval_specific_kwargs and "gpt_eval_model_name" in lmms_eval_specific_kwargs:
-        return lmms_eval_specific_kwargs["gpt_eval_model_name"]
-    return os.getenv(
-        "CAPSBENCH_EVAL_MODEL",
-        capsbench_config.get("metadata", {}).get("gpt_eval_model_name", "gpt-4o-2024-08-06"),
-    )
+    return _get_gpt_eval_model(capsbench_config)
 
 
 def _capsbench_normalize_answer(ans: str) -> str:
@@ -4406,7 +4470,7 @@ def _capsbench_call_judge(caption: str, questions: List[Dict[str, Any]], model: 
                 temperature=0,
                 max_tokens=512,
             )
-            content = (response.choices[0].message.content or "").strip()
+            content = _chat_completion_content(response)
             answers = _capsbench_parse_answers(content, len(questions))
             return answers
         except Exception as e:

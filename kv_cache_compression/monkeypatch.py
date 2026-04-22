@@ -93,6 +93,39 @@ from .qwen2_5vl_model import (
     qwen2_5vl_text_model_forward_dart,
     qwen2_5vl_generation_forward_dart,
 )
+from .llava_onevision1_5_model import (
+    GENERATION_MODEL_CLASS,
+    TEXT_FLASH_CLASS,
+    TEXT_MODEL_CLASS,
+    VISION_FLASH_CLASS,
+    VISION_MODEL_CLASS,
+    _ensure_flash_attention_only,
+    get_llava_onevision1_5_remote_family_counts,
+    is_llava_onevision1_5_remote_model,
+    llava_onevision1_5_generation_forward_dart,
+    llava_onevision1_5_generation_forward_fastv,
+    llava_onevision1_5_generation_forward_prumerge_plus,
+    llava_onevision1_5_generation_forward_visionzip,
+    llava_onevision1_5_rice_attention_forward_prumerge_plus,
+    llava_onevision1_5_rice_attention_forward_visionzip,
+    llava_onevision1_5_rice_block_forward_prumerge_plus,
+    llava_onevision1_5_rice_block_forward_visionzip,
+    llava_onevision1_5_text_attention_forward_dart,
+    llava_onevision1_5_text_attention_forward_fastv,
+    llava_onevision1_5_text_model_forward_dart,
+    llava_onevision1_5_text_model_forward_fastv,
+    llava_onevision1_5_vision_tower_forward_prumerge_plus,
+    llava_onevision1_5_vision_tower_forward_visionzip,
+)
+
+
+def _validate_attention_patch(stats, method):
+    attention_required_methods = {"fastv", "visionzip", "prumerge+", "dart"}
+    if method in attention_required_methods and stats["patched_attention_count"] == 0:
+        raise RuntimeError(
+            f"[{stats['replace_fn']}] method={method}: patched_attention_count=0; "
+            "refusing silent fallback to native forward"
+        )
 
 
 def _parse_stage_list_arg(value, arg_name, cast_type):
@@ -152,6 +185,13 @@ def _resolve_qwen2vl_pdrop_config(args):
 
 
 def replace_qwen(args, model, method):
+    stats = {
+        "replace_fn": "replace_qwen",
+        "method": method,
+        "patched_attention_count": 0,
+        "patched_model_count": 0,
+        "patched_generate_count": 0,
+    }
 
     if method == "streamingllm":
         print('using streamingllm')
@@ -159,6 +199,7 @@ def replace_qwen(args, model, method):
             if isinstance(module, Qwen2Attention):
                 module.forward = types.MethodType(qwen_attention_forward_streamingLLM, module)
                 module.budgets = args.budgets
+                stats["patched_attention_count"] += 1
     elif method == "h2o":
         print('using h2o')
         for name, module in model.named_modules():
@@ -166,6 +207,7 @@ def replace_qwen(args, model, method):
                 module.forward = types.MethodType(qwen_attention_forward_H2O, module)
                 module.budgets = args.budgets
                 module.h2o_head_adaptive = args.h2o_head_adaptive
+                stats["patched_attention_count"] += 1
 
     elif method == "vl-cache":
         print('using vlcache')
@@ -176,8 +218,10 @@ def replace_qwen(args, model, method):
                 module.vlcache_different_window_per_layer = getattr(args,'vlcache_different_window_per_layer',False)
                 module.vlcache_head_adaptive = getattr(args,'head_adaptive',False)
                 module.vlcache_budget_layer_adaptive = getattr(args, 'layer_adaptive', True)
+                stats["patched_attention_count"] += 1
             if isinstance(module, Qwen2Model):
                 module.forward = types.MethodType(qwen_model_forward_vlcache, module)
+                stats["patched_model_count"] += 1
 
     elif method == 'look-m':
         print('using look-m')
@@ -188,6 +232,7 @@ def replace_qwen(args, model, method):
                 module.merge = getattr(args, 'merge', False)
                 module.hh_ratio = getattr(args, 'hh_ratio', None)
                 module.recent_ratio = getattr(args, 'recent_ratio', None)
+                stats["patched_attention_count"] += 1
 
     elif method == 'snapkv':
         print('using snapkv')
@@ -197,6 +242,7 @@ def replace_qwen(args, model, method):
                 module.budgets = args.budgets
                 module.snapkv_head_adaptive = args.snapkv_head_adaptive
                 module.pooling = args.pooling
+                stats["patched_attention_count"] += 1
 
     elif method == 'fastv':
         print('using fastv')
@@ -204,11 +250,13 @@ def replace_qwen(args, model, method):
             if isinstance(module, Qwen2Attention):
                 module.forward = types.MethodType(qwen_attention_forward_fastv, module)
                 module.target_layer_idx = getattr(args, 'target_layer_idx', 2)
+                stats["patched_attention_count"] += 1
             if isinstance(module, Qwen2Model):
                 module.forward = types.MethodType(qwen_model_forward_fastv, module)
                 module.target_layer_idx = getattr(args, 'target_layer_idx', 2)
                 module.budgets = getattr(args, 'budgets', 1.0)
                 module.origin = getattr(args, 'origin', False)
+                stats["patched_model_count"] += 1
 
     # elif method == "csp":
     #     print('using csp')
@@ -235,13 +283,15 @@ def replace_qwen(args, model, method):
                 module.budgets = args.budgets
                 module.pyramidkv_head_adaptive = args.pyramidkv_head_adaptive
                 module.pooling = args.pooling
-    
+                stats["patched_attention_count"] += 1
+
     elif method == 'random':
         print('using random')
         for name, module in model.named_modules():
             if isinstance(module, Qwen2Attention):
                 module.forward = types.MethodType(qwen_attention_forward_random, module)
                 module.budgets = getattr(args, 'budgets', 1.0)
+                stats["patched_attention_count"] += 1
 
     elif method == 'visionzip':
         print('using visionzip')
@@ -257,6 +307,7 @@ def replace_qwen(args, model, method):
         LlavaMetaForCausalLM.encode_images_visionzip = encode_images_visionzip
         LlavaMetaForCausalLM.encode_images_visionzip_simple = encode_images_visionzip_simple
         LlavaQwenForCausalLM.prepare_inputs_labels_for_multimodal = prepare_inputs_labels_for_multimodal_visionzip
+        stats["patched_attention_count"] += 1
 
 
     elif method == 'prumerge+':
@@ -269,6 +320,7 @@ def replace_qwen(args, model, method):
         LlavaMetaForCausalLM.encode_images_prumerge_plus = encode_images_prumerge_plus
         LlavaMetaForCausalLM.encode_images_prumerge_plus_simple = encode_images_prumerge_plus_simple
         LlavaQwenForCausalLM.prepare_inputs_labels_for_multimodal = prepare_inputs_labels_for_multimodal_prumerge_plus
+        stats["patched_attention_count"] += 1
 
     elif method == 'sparsevlm':
         print('using sparsevlm')
@@ -287,12 +339,17 @@ def replace_qwen(args, model, method):
             if isinstance(module, Qwen2Attention):
                 module.forward = types.MethodType(qwen_attention_forward_dart, module)
                 module.target_layer_idx = target_layer_idx
+                stats["patched_attention_count"] += 1
             if isinstance(module, Qwen2Model):
                 module.forward = types.MethodType(qwen_model_forward_dart, module)
                 module.target_layer_idx = target_layer_idx
                 module.budgets = float(getattr(args, 'budgets', 1.0))
                 module.pivot_image_token = int(getattr(args, 'pivot_image_token', 4))
                 module.pivot_text_token = int(getattr(args, 'pivot_text_token', 4))
+                stats["patched_model_count"] += 1
+
+    _validate_attention_patch(stats, method)
+    return stats
 
 
 def replace_qwen2vl(args, model, method):
@@ -429,6 +486,159 @@ def replace_qwen2vl(args, model, method):
                 module.budgets = float(getattr(args, 'budgets', 1.0))
                 module.pivot_image_token = int(getattr(args, 'pivot_image_token', 4))
                 module.pivot_text_token = int(getattr(args, 'pivot_text_token', 4))
+
+
+def replace_llava_onevision1_5(args, model, method):
+    stats = {
+        "replace_fn": "replace_llava_onevision1_5",
+        "method": method,
+        "patched_attention_count": 0,
+        "patched_model_count": 0,
+        "patched_generate_count": 0,
+    }
+
+    if not is_llava_onevision1_5_remote_model(model):
+        raise RuntimeError(
+            "replace_llava_onevision1_5 was called for a model that does not look "
+            "like remote-code LLaVA-OneVision-1.5."
+        )
+
+    _ensure_flash_attention_only(model, method)
+
+    if method == 'fastv':
+        print('using llava-onevision1.5 fastv')
+        target_layer_idx = int(getattr(args, 'target_layer_idx', 2))
+        for _, module in model.named_modules():
+            if module.__class__.__name__ == TEXT_FLASH_CLASS:
+                module.forward = types.MethodType(
+                    llava_onevision1_5_text_attention_forward_fastv,
+                    module,
+                )
+                module.target_layer_idx = target_layer_idx
+                stats["patched_attention_count"] += 1
+            elif module.__class__.__name__ == TEXT_MODEL_CLASS:
+                module.forward = types.MethodType(
+                    llava_onevision1_5_text_model_forward_fastv,
+                    module,
+                )
+                module.target_layer_idx = target_layer_idx
+                module.budgets = float(getattr(args, 'budgets', 1.0))
+                module.origin = getattr(args, 'origin', False)
+                stats["patched_model_count"] += 1
+            elif module.__class__.__name__ == GENERATION_MODEL_CLASS:
+                module.forward = types.MethodType(
+                    llava_onevision1_5_generation_forward_fastv,
+                    module,
+                )
+                stats["patched_generate_count"] += 1
+
+    elif method == 'dart':
+        print('using llava-onevision1.5 dart')
+        target_layer_idx = int(getattr(args, 'target_layer_idx', 2))
+        for _, module in model.named_modules():
+            if module.__class__.__name__ == TEXT_FLASH_CLASS:
+                module.forward = types.MethodType(
+                    llava_onevision1_5_text_attention_forward_dart,
+                    module,
+                )
+                module.target_layer_idx = target_layer_idx
+                stats["patched_attention_count"] += 1
+            elif module.__class__.__name__ == TEXT_MODEL_CLASS:
+                module.forward = types.MethodType(
+                    llava_onevision1_5_text_model_forward_dart,
+                    module,
+                )
+                module.target_layer_idx = target_layer_idx
+                module.budgets = float(getattr(args, 'budgets', 1.0))
+                module.pivot_image_token = int(getattr(args, 'pivot_image_token', 4))
+                module.pivot_text_token = int(getattr(args, 'pivot_text_token', 4))
+                stats["patched_model_count"] += 1
+            elif module.__class__.__name__ == GENERATION_MODEL_CLASS:
+                module.forward = types.MethodType(
+                    llava_onevision1_5_generation_forward_dart,
+                    module,
+                )
+                stats["patched_generate_count"] += 1
+
+    elif method == 'visionzip':
+        print('using llava-onevision1.5 visionzip')
+        for _, module in model.named_modules():
+            if module.__class__.__name__ == VISION_FLASH_CLASS:
+                module.forward = types.MethodType(
+                    llava_onevision1_5_rice_attention_forward_visionzip,
+                    module,
+                )
+                stats["patched_attention_count"] += 1
+            elif module.__class__.__name__ == VISION_MODEL_CLASS:
+                module.forward = types.MethodType(
+                    llava_onevision1_5_vision_tower_forward_visionzip,
+                    module,
+                )
+                module.budgets = float(getattr(args, 'budgets', 1.0))
+                stats["patched_model_count"] += 1
+            elif module.__class__.__name__ == GENERATION_MODEL_CLASS:
+                module.forward = types.MethodType(
+                    llava_onevision1_5_generation_forward_visionzip,
+                    module,
+                )
+                stats["patched_generate_count"] += 1
+        for block in model.model.visual.blocks:
+            block.forward = types.MethodType(
+                llava_onevision1_5_rice_block_forward_visionzip,
+                block,
+            )
+
+    elif method == 'prumerge+':
+        print('using llava-onevision1.5 prumerge+')
+        for _, module in model.named_modules():
+            if module.__class__.__name__ == VISION_FLASH_CLASS:
+                module.forward = types.MethodType(
+                    llava_onevision1_5_rice_attention_forward_prumerge_plus,
+                    module,
+                )
+                stats["patched_attention_count"] += 1
+            elif module.__class__.__name__ == VISION_MODEL_CLASS:
+                module.forward = types.MethodType(
+                    llava_onevision1_5_vision_tower_forward_prumerge_plus,
+                    module,
+                )
+                module.budgets = float(getattr(args, 'budgets', 1.0))
+                stats["patched_model_count"] += 1
+            elif module.__class__.__name__ == GENERATION_MODEL_CLASS:
+                module.forward = types.MethodType(
+                    llava_onevision1_5_generation_forward_prumerge_plus,
+                    module,
+                )
+                stats["patched_generate_count"] += 1
+        for block in model.model.visual.blocks:
+            block.forward = types.MethodType(
+                llava_onevision1_5_rice_block_forward_prumerge_plus,
+                block,
+            )
+
+    else:
+        raise ValueError(f"Unknown method '{method}' for replace_llava_onevision1_5")
+
+    family_counts = get_llava_onevision1_5_remote_family_counts(model)
+    if method in {'fastv', 'dart'} and stats["patched_model_count"] == 0:
+        raise RuntimeError(
+            f"[replace_llava_onevision1_5] method={method}: patched_model_count=0; "
+            "text model patch did not bind to the remote-code class family"
+        )
+    if method in {'visionzip', 'prumerge+'} and family_counts["vision_model"] == 0:
+        raise RuntimeError(
+            f"[replace_llava_onevision1_5] method={method}: RiceTransformerPretrainedModel "
+            "was not found in the loaded model"
+        )
+    if method in {'fastv', 'dart', 'visionzip', 'prumerge+'} and stats["patched_generate_count"] == 0:
+        raise RuntimeError(
+            f"[replace_llava_onevision1_5] method={method}: patched_generate_count=0; "
+            "refusing silent fallback to native generation forward"
+        )
+
+    _validate_attention_patch(stats, method)
+    return stats
+
 
 def replace_internvl2_5(args, model, method):
 
@@ -660,12 +870,21 @@ def replace_qwen_for_internvl_38B(args, model, method):
 def replace_qwen2_5vl(args, model, method):
     from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLAttention
 
+    stats = {
+        "replace_fn": "replace_qwen2_5vl",
+        "method": method,
+        "patched_attention_count": 0,
+        "patched_model_count": 0,
+        "patched_generate_count": 0,
+    }
+
     if method == 'streamingllm':
         print('using streamingllm')
         for name, module in model.named_modules():
             if isinstance(module, Qwen2_5_VLAttention):
                 module.forward = types.MethodType(qwen_flash_attention_forward_streamingLLM, module)
                 module.budgets = args.budgets
+                stats["patched_attention_count"] += 1
 
     elif method == 'h2o':
         print('using h2o')
@@ -674,6 +893,7 @@ def replace_qwen2_5vl(args, model, method):
                 module.forward = types.MethodType(qwen_flash_attention_forward_H2O, module)
                 module.budgets = args.budgets
                 module.h2o_head_adaptive = args.h2o_head_adaptive
+                stats["patched_attention_count"] += 1
 
     elif method == 'snapkv':
         print('using snapkv')
@@ -683,6 +903,7 @@ def replace_qwen2_5vl(args, model, method):
                 module.budgets = args.budgets
                 module.snapkv_head_adaptive = args.snapkv_head_adaptive
                 module.pooling = args.pooling
+                stats["patched_attention_count"] += 1
 
     elif method == 'pyramidkv':
         print('using pyramidkv')
@@ -692,6 +913,7 @@ def replace_qwen2_5vl(args, model, method):
                 module.budgets = args.budgets
                 module.pyramidkv_head_adaptive = args.pyramidkv_head_adaptive
                 module.pooling = args.pooling
+                stats["patched_attention_count"] += 1
 
     elif method == 'random':
         print('using random')
@@ -699,6 +921,7 @@ def replace_qwen2_5vl(args, model, method):
             if isinstance(module, Qwen2_5_VLAttention):
                 module.forward = types.MethodType(qwen_flash_attention_forward_random, module)
                 module.budgets = getattr(args, 'budgets', 1.0)
+                stats["patched_attention_count"] += 1
 
     elif method == 'look-m':
         print('using look-m')
@@ -709,6 +932,7 @@ def replace_qwen2_5vl(args, model, method):
                 module.merge = getattr(args, 'merge', True)
                 module.hh_ratio = getattr(args, 'hh_ratio', None)
                 module.recent_ratio = getattr(args, 'recent_ratio', None)
+                stats["patched_attention_count"] += 1
 
     elif method == 'vl-cache':
         print('using vlcache')
@@ -720,26 +944,29 @@ def replace_qwen2_5vl(args, model, method):
                 module.vlcache_different_window_per_layer = getattr(args, 'vlcache_different_window_per_layer', False)
                 module.vlcache_head_adaptive = getattr(args, 'head_adaptive', False)
                 module.vlcache_budget_layer_adaptive = getattr(args, 'layer_adaptive', True)
+                stats["patched_attention_count"] += 1
             if isinstance(module, Qwen2_5_VLModel):
                 module.forward = types.MethodType(qwen2vl_model_forward_vlcache, module)
+                stats["patched_model_count"] += 1
 
     elif method == 'fastv':
         print('using fastv')
-        from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
-            Qwen2_5_VLTextModel, Qwen2_5_VLForConditionalGeneration,
-        )
+        from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLTextModel
         target_layer_idx = getattr(args, 'target_layer_idx', 2)
         for name, module in model.named_modules():
             if isinstance(module, Qwen2_5_VLAttention):
                 module.forward = types.MethodType(qwen2_5vl_flash_attention_forward_fastv, module)
                 module.target_layer_idx = target_layer_idx
+                stats["patched_attention_count"] += 1
             if isinstance(module, Qwen2_5_VLTextModel):
                 module.forward = types.MethodType(qwen2_5vl_text_model_forward_fastv, module)
                 module.target_layer_idx = target_layer_idx
                 module.budgets = getattr(args, 'budgets', 1.0)
                 module.origin = getattr(args, 'origin', False)
+                stats["patched_model_count"] += 1
         import transformers.models.qwen2_5_vl.modeling_qwen2_5_vl as q25vl
         q25vl.Qwen2_5_VLForConditionalGeneration.forward = qwen2_5vl_generation_forward_fastv
+        stats["patched_generate_count"] += 1
 
     elif method == 'pdrop':
         print('using pdrop')
@@ -781,9 +1008,12 @@ def replace_qwen2_5vl(args, model, method):
             blk.attn.target_layer_idx = target_block_idx
             blk.attn.forward = types.MethodType(qwen2_5vl_vision_attention_forward_visionzip, blk.attn)
             blk.forward = types.MethodType(qwen2_5vl_vision_block_forward_visionzip, blk)
+            stats["patched_attention_count"] += 1
         q25vl.Qwen2_5_VisionTransformerPretrainedModel.forward = qwen2_5vl_vision_tower_forward_visionzip
         q25vl.Qwen2_5_VisionTransformerPretrainedModel.budgets = getattr(args, 'budgets', 1.0)
         q25vl.Qwen2_5_VLForConditionalGeneration.forward = qwen2_5vl_generation_forward_visionzip
+        stats["patched_model_count"] += 1
+        stats["patched_generate_count"] += 1
 
     elif method == 'prumerge+':
         print('using prumerge+')
@@ -801,31 +1031,38 @@ def replace_qwen2_5vl(args, model, method):
             blk.attn.target_layer_idx = target_block_idx
             blk.attn.forward = types.MethodType(qwen2_5vl_vision_attention_forward_prumerge_plus, blk.attn)
             blk.forward = types.MethodType(qwen2_5vl_vision_block_forward_prumerge_plus, blk)
+            stats["patched_attention_count"] += 1
         q25vl.Qwen2_5_VisionTransformerPretrainedModel.forward = qwen2_5vl_vision_tower_forward_prumerge_plus
         q25vl.Qwen2_5_VisionTransformerPretrainedModel.budgets = getattr(args, 'budgets', 1.0)
         q25vl.Qwen2_5_VLForConditionalGeneration.forward = qwen2_5vl_generation_forward_prumerge_plus
+        stats["patched_model_count"] += 1
+        stats["patched_generate_count"] += 1
 
     elif method == 'dart':
         print('using dart')
-        from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
-            Qwen2_5_VLTextModel, Qwen2_5_VLForConditionalGeneration,
-        )
+        from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLTextModel
         import transformers.models.qwen2_5_vl.modeling_qwen2_5_vl as q25vl
         target_layer_idx = int(getattr(args, 'target_layer_idx', 2))
         for name, module in model.named_modules():
             if isinstance(module, Qwen2_5_VLAttention):
                 module.forward = types.MethodType(qwen2_5vl_flash_attention_forward_dart, module)
                 module.target_layer_idx = target_layer_idx
+                stats["patched_attention_count"] += 1
             if isinstance(module, Qwen2_5_VLTextModel):
                 module.forward = types.MethodType(qwen2_5vl_text_model_forward_dart, module)
                 module.target_layer_idx = target_layer_idx
                 module.budgets = float(getattr(args, 'budgets', 1.0))
                 module.pivot_image_token = int(getattr(args, 'pivot_image_token', 4))
                 module.pivot_text_token = int(getattr(args, 'pivot_text_token', 4))
+                stats["patched_model_count"] += 1
         q25vl.Qwen2_5_VLForConditionalGeneration.forward = qwen2_5vl_generation_forward_dart
+        stats["patched_generate_count"] += 1
 
     else:
         raise ValueError(f"Unknown method '{method}' for replace_qwen2_5vl")
+
+    _validate_attention_patch(stats, method)
+    return stats
 
 
 def replace_qwen3vl(args, model, method):

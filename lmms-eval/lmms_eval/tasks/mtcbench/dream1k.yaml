@@ -8,7 +8,7 @@ dataset_kwargs:
     test: "metadata.json"
 metadata:
   version: 0.0.1
-  gpt_eval_model_name: "gpt-3.5-turbo"
+  gpt_eval_model_name: "gpt-3.5-turbo-1106"
 task: "dream1k_test_mtcbench"
 test_split: test
 group: mtcbench_video

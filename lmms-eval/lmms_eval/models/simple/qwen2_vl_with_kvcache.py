@@ -4,7 +4,6 @@ from io import BytesIO
 from typing import List, Optional, Tuple, Union
 
 import decord
-import numpy as np
 import torch
 from accelerate import Accelerator, DistributedType
 from loguru import logger as eval_logger
@@ -45,6 +44,9 @@ class Qwen2_VL_with_kvcache(lmms):
         max_pixels: int = 700*28*28, 
         min_pixels: int = 3136,
         max_num_frames: int = 32,
+        fps: float = 1.0,
+        min_frames: int = 4,
+        max_frames: int = 32,
         method: Optional[str] = None,
         **kwargs,
     ) -> None:
@@ -54,7 +56,7 @@ class Qwen2_VL_with_kvcache(lmms):
             defined_params = {
             "pretrained", "device", "batch_size", "attn_implementation",
             "use_flash_attention_2", "device_map", "max_pixels", "use_cache",
-            "min_pixels", "max_num_frames", "method"
+            "min_pixels", "max_num_frames", "fps", "min_frames", "max_frames", "method"
             }
             
             extra_kwargs = {k: v for k, v in kwargs.items() if k not in defined_params}
@@ -97,6 +99,9 @@ class Qwen2_VL_with_kvcache(lmms):
         self.max_pixels = max_pixels
         self.min_pixels = min_pixels
         self.max_num_frames = max_num_frames
+        self.fps = fps
+        self.min_frames = min_frames
+        self.max_frames = max_frames
         self._tokenizer = AutoTokenizer.from_pretrained(pretrained)
 
         self._config = self.model.config
@@ -235,7 +240,22 @@ class Qwen2_VL_with_kvcache(lmms):
                         # first_frame = vr[0].asnumpy()
                         # height, width = first_frame.shape[:2]
                         # max_pixels = height * width
-                        message.append({"role": "user", "content": [{"type": "video", "video": visual, "max_pixels": self.max_pixels}, {"type": "text", "text": context}]})
+                        message.append(
+                            {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "video",
+                                        "video": visual,
+                                        "max_pixels": self.max_pixels,
+                                        "fps": self.fps,
+                                        "min_frames": self.min_frames,
+                                        "max_frames": self.max_frames,
+                                    },
+                                    {"type": "text", "text": context},
+                                ],
+                            }
+                        )
                     elif isinstance(visual, Image.Image):  # Single image
                         base64_image = visual.convert("RGB")
                         buffer = BytesIO()
@@ -262,13 +282,6 @@ class Qwen2_VL_with_kvcache(lmms):
 
             texts = [self.processor.apply_chat_template(msg, tokenize=False, add_generation_prompt=True) for msg in messages]
             image_inputs, video_inputs = process_vision_info(messages)
-            if video_inputs is not None:
-                total_frames = video_inputs[0].shape[0]
-                indices = np.linspace(0, total_frames - 1, self.max_num_frames, dtype=int)
-                # Append the last frame index if not already included
-                if total_frames - 1 not in indices:
-                    indices = np.append(indices, total_frames - 1)
-                video_inputs[0] = video_inputs[0][indices]
             inputs = self.processor(text=texts, images=image_inputs, videos=video_inputs, padding=True, return_tensors="pt")
 
             if self.device_map == "auto":

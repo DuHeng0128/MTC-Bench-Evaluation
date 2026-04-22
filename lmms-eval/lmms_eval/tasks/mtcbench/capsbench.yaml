@@ -7,7 +7,7 @@ dataset_kwargs:
     test: "data/test-00000-of-00001.parquet"
 metadata:
   version: 0.0.1
-  gpt_eval_model_name: "gpt-3.5-turbo"
+  gpt_eval_model_name: "gpt-3.5-turbo-1106"
 task: "capsbench_test_mtcbench"
 test_split: test
 group: mtcbench_image

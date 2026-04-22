@@ -26,7 +26,7 @@ metric_list:
     aggregation: !function utils.mmbench_cn_cc_aggregate_results
 metadata:
   version: 0.0
-  gpt_eval_model_name: "gpt-3.5-turbo"
+  gpt_eval_model_name: "gpt-3.5-turbo-1106"
 
 lmms_eval_specific_kwargs:
   default:

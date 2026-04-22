@@ -1,4 +1,8 @@
 dataset_path: /root/data2/lisida/MTC-Bench-Data/video/Specific_Capabilities/Complex_Crossmodal_Alignment/MMVU
+metadata:
+  version: 0.0
+  gpt_eval_model_name: "gpt-3.5-turbo-1106"
+
 dataset_kwargs:
   token: True
   verification_mode: "no_checks"

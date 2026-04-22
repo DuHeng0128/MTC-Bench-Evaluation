@@ -1,6 +1,6 @@
 metadata:
   version: 0.0
-  gpt_eval_model_name: "gpt-3.5-turbo"
+  gpt_eval_model_name: "gpt-3.5-turbo-1106"
   max_workers: 1
 
 dataset_path: /root/data2/lisida/MTC-Bench-Data/image/Specific_Capabilities/High_rate_Compression/HR-Bench/

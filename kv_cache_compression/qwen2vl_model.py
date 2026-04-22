@@ -1581,17 +1581,19 @@ def qwen2vl_vision_tower_forward_visionzip(self, hidden_states: torch.Tensor, gr
             hidden_states = blk(hidden_states, cu_seqlens=cu_seqlens, rotary_pos_emb=rotary_pos_emb)
 
     attn_weights = self.blocks[-2].attn.attn_weights
-    num_heads, q_len, k_len = attn_weights.shape
-    assert q_len == k_len, "q_len and k_len should be the same, the error is in Qwen2VisionTransformerPretrainedModel's forward function"
-    attn_weights = attn_weights.mean(dim=0).mean(dim=0)  
+    if attn_weights.ndim == 3:
+        # Legacy path: full [num_heads, seq_len, seq_len] matrix (image-only, small seq_len)
+        num_heads, q_len, k_len = attn_weights.shape
+        assert q_len == k_len, "q_len and k_len should be the same, the error is in Qwen2VisionTransformerPretrainedModel's forward function"
+        attn_weights = attn_weights.mean(dim=0).mean(dim=0)
+    # else: already 1D [seq_len] pre-reduced importance scores (per-segment path for video)
     attention_sum = attn_weights.view(-1, 4).mean(dim=1)
-    
 
 
-    hidden_states = self.merger(hidden_states) 
+    hidden_states = self.merger(hidden_states)
     metric = self.blocks[-2].attn.metric
     self.blocks[-2].attn.metric = None
-    metric = metric.view(num_heads, metric.shape[1] // 4, 4, -1)  
+    metric = metric.view(metric.shape[0], metric.shape[1] // 4, 4, -1)
 
     metric = metric.mean(dim=2).mean(dim=0)   
     total_token_num = metric.shape[0]
@@ -1664,22 +1666,22 @@ def qwen2vl_vision_flash_attention2_forward_visionzip(self, hidden_states: torch
         q = apply_rotary_pos_emb_vision(q.unsqueeze(0), rotary_pos_emb).squeeze(0)   # seq_len, num_heads, head_dim
         k = apply_rotary_pos_emb_vision(k.unsqueeze(0), rotary_pos_emb).squeeze(0)
 
-        if self.layer_idx == 30:  
+        if self.layer_idx == 30:
             k_here = k.transpose(0, 1)   # [num_heads, seq_len, head_dim]
             self.metric = k_here
-            q_here = q.transpose(0, 1)
-
-            attention_mask_here = torch.full(  
-                [1, seq_length, seq_length], True, dtype=torch.bool, device=q.device
-            )
+            # Compute per-segment attention importance to avoid O(seq_len^2) memory for video.
+            # Attention is block-diagonal (each segment attends only to itself via cu_seqlens),
+            # so we process each segment independently and accumulate importance scores.
+            importance = torch.zeros(seq_length, dtype=torch.float32, device=q.device)
             for i in range(1, len(cu_seqlens)):
-                attention_mask_here[..., cu_seqlens[i - 1] : cu_seqlens[i], cu_seqlens[i - 1] : cu_seqlens[i]] = False  
-            attn_weights_here = torch.matmul(q_here, k_here.transpose(1, 2)) / math.sqrt(q.shape[-1])   # [num_heads, seq_len, seq_len]
-            # attn_weights_here = attn_weights_here + attention_mask_here
-            attn_weights_here = attn_weights_here.masked_fill(attention_mask_here, float('-inf'))
-            attn_weights_here = nn.functional.softmax(attn_weights_here, dim=-1, dtype=torch.float32)
-            self.attn_weights = attn_weights_here
-            del k_here, q_here, attention_mask_here, attn_weights_here
+                s, e = cu_seqlens[i - 1].item(), cu_seqlens[i].item()
+                seg_q = q[s:e].transpose(0, 1)  # [num_heads, seg_len, head_dim]
+                seg_k = k[s:e].transpose(0, 1)  # [num_heads, seg_len, head_dim]
+                seg_attn = torch.matmul(seg_q, seg_k.transpose(1, 2)) / math.sqrt(q.shape[-1])
+                seg_attn = nn.functional.softmax(seg_attn, dim=-1, dtype=torch.float32)
+                importance[s:e] = seg_attn.mean(dim=0).mean(dim=0)  # mean over heads then queries
+                del seg_q, seg_k, seg_attn
+            self.attn_weights = importance  # 1D [seq_len], pre-reduced importance scores
 
         max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
         attn_output = flash_attn_varlen_func(q, k, v, cu_seqlens, cu_seqlens, max_seqlen, max_seqlen).reshape(
@@ -1914,15 +1916,19 @@ def qwen2vl_vision_tower_forward_prumerge_plus(self, hidden_states: torch.Tensor
         else:
             hidden_states = blk(hidden_states, cu_seqlens=cu_seqlens, rotary_pos_emb=rotary_pos_emb)
 
-    #  attn_weights [16,616,616]
     attn_weights = self.blocks[-2].attn.attn_weights_prumerge_plus
-    num_heads, q_len, k_len = attn_weights.shape
-    assert q_len == k_len, "q_len and k_len should be the same, the error is in Qwen2VisionTransformerPretrainedModel's forward function"
-    q_len_pooled = q_len // 4
-    k_len_pooled = k_len // 4
-    attn_weights = attn_weights.view(num_heads, q_len_pooled, 4, k_len_pooled, 4)  
-    attn_weights = attn_weights.mean(dim=(2, 4))
-
+    if attn_weights.ndim == 2:
+        # Pre-reduced path: [1, seq_len//4] — already the cls_attn (per-segment loop in attention forward)
+        cls_attn = attn_weights
+    else:
+        # Legacy path: full [num_heads, seq_len, seq_len] matrix (image-only, small seq_len)
+        num_heads, q_len, k_len = attn_weights.shape
+        assert q_len == k_len, "q_len and k_len should be the same, the error is in Qwen2VisionTransformerPretrainedModel's forward function"
+        q_len_pooled = q_len // 4
+        k_len_pooled = k_len // 4
+        attn_weights = attn_weights.view(num_heads, q_len_pooled, 4, k_len_pooled, 4)
+        attn_weights = attn_weights.mean(dim=(2, 4))
+        cls_attn = torch.mean(attn_weights, dim=[0, 1]).unsqueeze(0)
 
     image_features = self.merger(hidden_states)
     image_features = image_features.unsqueeze(0)
@@ -1933,8 +1939,7 @@ def qwen2vl_vision_tower_forward_prumerge_plus(self, hidden_states: torch.Tensor
     desired_layer_k = desired_layer_k.view(desired_layer_k.shape[0] // 4, 4, -1)
     desired_layer_k = desired_layer_k.mean(dim=1).unsqueeze(0)
     k_C = desired_layer_k.shape[-1]
-    cls_attn = torch.mean(attn_weights, dim=[0,1]).unsqueeze(0)
-    
+
     assert cls_attn.ndim == 2
 
     reduction_ratio = outlier_dectection_prumerge_plus(cls_attn)#*3.5
@@ -2042,24 +2047,26 @@ def qwen2vl_vision_flash_attention2_forward_prumerge_plus(self, hidden_states: t
         q = apply_rotary_pos_emb_vision(q.unsqueeze(0), rotary_pos_emb).squeeze(0)   # seq_len, num_heads, head_dim
         k = apply_rotary_pos_emb_vision(k.unsqueeze(0), rotary_pos_emb).squeeze(0)
 
-        if self.layer_idx == 30:  
-            k_here = k.transpose(0, 1)   # [num_heads, seq_len, head_dim]
+        if self.layer_idx == 30:
             self.metric = k.view(seq_length, -1)
-            q_here = q.transpose(0, 1)
-            attn_weights_here = torch.matmul(q_here, k_here.transpose(1, 2)) / math.sqrt(q.shape[-1])   # [num_heads, seq_len, seq_len]
-
-            attention_mask_here = torch.full( 
-
-            [1, seq_length, seq_length], True, dtype=torch.bool, device=q.device
-            )
+            n_heads = q.shape[1]
+            # Compute per-segment pooled attention importance to avoid O(seq_len^2) memory for video.
+            # Attention is block-diagonal; process each segment independently and accumulate.
+            q_len_pooled = seq_length // 4
+            cls_attn_accum = torch.zeros(q_len_pooled, dtype=torch.float32, device=q.device)
             for i in range(1, len(cu_seqlens)):
-                attention_mask_here[..., cu_seqlens[i - 1] : cu_seqlens[i], cu_seqlens[i - 1] : cu_seqlens[i]] = False 
-            
-            attn_weights_here = attn_weights_here.masked_fill(attention_mask_here, float('-inf'))
-            del k_here, q_here,attention_mask_here
-            attn_weights_here = nn.functional.softmax(attn_weights_here, dim=-1, dtype=torch.float32)
-            self.attn_weights_prumerge_plus = attn_weights_here
-            del attn_weights_here
+                s, e = cu_seqlens[i - 1].item(), cu_seqlens[i].item()
+                seg_len = e - s
+                seg_q = q[s:e].transpose(0, 1)  # [num_heads, seg_len, head_dim]
+                seg_k = k[s:e].transpose(0, 1)  # [num_heads, seg_len, head_dim]
+                seg_attn = torch.matmul(seg_q, seg_k.transpose(1, 2)) / math.sqrt(q.shape[-1])
+                seg_attn = nn.functional.softmax(seg_attn, dim=-1, dtype=torch.float32)
+                # Pool 4 consecutive tokens (matching the merger's spatial 2x2 grouping)
+                seg_pooled = seg_attn.view(n_heads, seg_len // 4, 4, seg_len // 4, 4).mean(dim=(2, 4))
+                ps, pe = s // 4, e // 4
+                cls_attn_accum[ps:pe] = seg_pooled.mean(dim=[0, 1])  # mean over heads and queries
+                del seg_q, seg_k, seg_attn, seg_pooled
+            self.attn_weights_prumerge_plus = cls_attn_accum.unsqueeze(0)  # [1, seq_len//4]
 
         max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
         attn_output = flash_attn_varlen_func(q, k, v, cu_seqlens, cu_seqlens, max_seqlen, max_seqlen).reshape(
