@@ -19,6 +19,8 @@ import lmms_eval.api
 import lmms_eval.api.metrics
 import lmms_eval.api.registry
 from lmms_eval import models
+
+RESPONSE_CACHE_CHUNK_SIZE = max(1, int(os.getenv("LMMS_EVAL_CACHE_CHUNK_SIZE", "256")))
 from lmms_eval.baselines import (
     BASELINE_REGISTRY,
     get_baseline_display_name,
@@ -604,13 +606,8 @@ def evaluate(
                 cloned_reqs.extend([req] * req.repeats)
 
         if response_cache_path is not None:
-            # Determine which requests are already cached vs need generation.
-            # Uses (task_name, doc_id, idx) as the stable cache key.
-            # Handles req.repeats by deduplifying: only one representative per
-            # unique key is sent to the model (correct for deterministic generation).
             cached_by_index: dict = {}
             seen_uncached_keys: set = set()
-            to_generate_indices: list = []
             to_generate_reqs: list = []
 
             for i, req in enumerate(cloned_reqs):
@@ -619,9 +616,7 @@ def evaluate(
                     cached_by_index[i] = response_cache[key]
                 elif key not in seen_uncached_keys:
                     seen_uncached_keys.add(key)
-                    to_generate_indices.append(i)
                     to_generate_reqs.append(req)
-                # else: duplicate key (from repeats), will be filled later
 
             n_cached = len(cached_by_index)
             n_unique_gen = len(to_generate_reqs)
@@ -631,22 +626,50 @@ def evaluate(
             )
 
             if to_generate_reqs:
-                new_resps_list = getattr(lm, reqtype)(to_generate_reqs)
-                new_resp_by_key: dict = {
-                    (req.task_name, req.doc_id, req.idx): resp
-                    for req, resp in zip(to_generate_reqs, new_resps_list)
-                }
-                # Save new responses (all ranks append with exclusive file lock)
+                pbar = tqdm(
+                    total=n_unique_gen,
+                    desc=f"Model Responding ({reqtype})",
+                    disable=(global_rank != 0),
+                )
+                new_resp_by_key: dict = {}
                 response_cache_path.parent.mkdir(parents=True, exist_ok=True)
-                with open(response_cache_path, "a", encoding="utf-8") as _f:
-                    fcntl.flock(_f, fcntl.LOCK_EX)
-                    try:
-                        for key, resp in new_resp_by_key.items():
-                            _entry = {"task": key[0], "doc_id": key[1], "idx": key[2], "resp": resp}
-                            _f.write(json.dumps(_entry, ensure_ascii=False) + "\n")
-                    finally:
-                        fcntl.flock(_f, fcntl.LOCK_UN)
-                # Fill all indices (cached + newly generated, including repeat duplicates)
+
+                for chunk_start in range(0, n_unique_gen, RESPONSE_CACHE_CHUNK_SIZE):
+                    chunk_end = min(
+                        chunk_start + RESPONSE_CACHE_CHUNK_SIZE,
+                        n_unique_gen,
+                    )
+                    chunk_reqs = to_generate_reqs[chunk_start:chunk_end]
+                    chunk_resps = getattr(lm, reqtype)(chunk_reqs)
+                    chunk_pairs = [
+                        ((req.task_name, req.doc_id, req.idx), resp)
+                        for req, resp in zip(chunk_reqs, chunk_resps)
+                    ]
+
+                    with open(response_cache_path, "a", encoding="utf-8") as _f:
+                        fcntl.flock(_f, fcntl.LOCK_EX)
+                        try:
+                            for key, resp in chunk_pairs:
+                                _entry = {
+                                    "task": key[0],
+                                    "doc_id": key[1],
+                                    "idx": key[2],
+                                    "resp": resp,
+                                }
+                                _f.write(
+                                    json.dumps(_entry, ensure_ascii=False) + "\n"
+                                )
+                        finally:
+                            fcntl.flock(_f, fcntl.LOCK_UN)
+
+                    for key, resp in chunk_pairs:
+                        new_resp_by_key[key] = resp
+                        response_cache[key] = resp
+
+                    pbar.update(len(chunk_reqs))
+
+                pbar.close()
+
                 for i, req in enumerate(cloned_reqs):
                     if i not in cached_by_index:
                         key = (req.task_name, req.doc_id, req.idx)

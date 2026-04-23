@@ -292,6 +292,8 @@ def parse_eval_args() -> argparse.Namespace:
         help=(
             "Cache model responses to {output_path}/response_cache.jsonl and reuse them on "
             "subsequent runs. Skips model inference for already-cached samples. "
+            "When LMMS_EVAL_CACHE_CHUNK_SIZE is set, newly generated responses are "
+            "appended every chunk instead of only at the end of the full request set. "
             "Requires --output_path. Assumes deterministic generation (temperature=0)."
         ),
     )
