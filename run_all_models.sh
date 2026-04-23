@@ -80,22 +80,22 @@ run_eval() {
 # ═══════════════════════════════════════════════════════════════════════════════
 # 1. Qwen2-VL-7B
 # ═══════════════════════════════════════════════════════════════════════════════
-# METHODS_QWEN2VL=(
-#     "fastv     fastv     use_flash_attention_2=true"
-#     "pdrop     pdrop     layer_list=[7,14,21],image_token_ratio_list=[0.3893,0.1516,0.0590],use_flash_attention_2=true"
-#     "visionzip visionzip use_flash_attention_2=true"
-#     "prumerge+ prumerge+ use_flash_attention_2=true"
-#     # "dart      dart      use_flash_attention_2=true"
-#     # "h2o        head      head_adaptive=True,use_flash_attention_2=true"
-#     # "snapkv     head      head_adaptive=True,pooling=avgpool,use_flash_attention_2=true"
-#     # "pyramidkv  head      head_adaptive=True,pooling=avgpool,use_flash_attention_2=true"
-#     # "look-m     merge     merge=True,use_flash_attention_2=true"
-#     # "streamingllm streamingllm use_flash_attention_2=true"
-# )
-# run_eval "qwen2_vl_with_kvcache" \
-#          "qwen2-vl" \
-#          "Qwen/Qwen2-VL-7B-Instruct" \
-#          METHODS_QWEN2VL
+METHODS_QWEN2VL=(
+    #"fastv     fastv     use_flash_attention_2=true"
+    #"pdrop     pdrop     layer_list=[7,14,21],image_token_ratio_list=[0.3893,0.1516,0.0590],use_flash_attention_2=true"
+    #"visionzip visionzip use_flash_attention_2=true"
+    #"prumerge+ prumerge+ use_flash_attention_2=true"
+    "dart      dart      use_flash_attention_2=true"
+    # "h2o        head      head_adaptive=True,use_flash_attention_2=true"
+    # "snapkv     head      head_adaptive=True,pooling=avgpool,use_flash_attention_2=true"
+    # "pyramidkv  head      head_adaptive=True,pooling=avgpool,use_flash_attention_2=true"
+    # "look-m     merge     merge=True,use_flash_attention_2=true"
+    # "streamingllm streamingllm use_flash_attention_2=true"
+)
+run_eval "qwen2_vl_with_kvcache" \
+         "qwen2-vl" \
+         "/public/huggingface-models/Qwen/Qwen2-VL-7B-Instruct" \
+         METHODS_QWEN2VL
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 2. Qwen2.5-VL-7B
@@ -156,23 +156,23 @@ run_eval() {
 # ═══════════════════════════════════════════════════════════════════════════════
 # 5. LLaVA-OneVision-1.5-8B
 # ═══════════════════════════════════════════════════════════════════════════════
-METHODS_LLAVA_OV15=(
-    # "fastv     fastv  attn_implementation=flash_attention_2"
-    # Applies to both mtcbench_image and mtcbench_video in TASKS above.
-    # "pdrop     pdrop     layer_list=[9,18,27],image_token_ratio_list=[0.3893,0.1516,0.0590]"
-    "visionzip visionzip  attn_implementation=flash_attention_2"
-    "prumerge+ prumerge+  attn_implementation=flash_attention_2"
-    "dart      dart  attn_implementation=flash_attention_2"
-    # "h2o        head      head_adaptive=True"
-    # "snapkv     head      head_adaptive=True,pooling=avgpool"
-    # "pyramidkv  head      head_adaptive=True,pooling=avgpool"
-    # "look-m     merge     merge=True"
-    # "streamingllm streamingllm"
-)
-run_eval "llava_onevision1_5_with_kvcache" \
-         "llava-onevision-1.5" \
-         "/root/data2/shared/models/LLaVA-OneVision-1.5-8B-Instruct" \
-         METHODS_LLAVA_OV15
+# METHODS_LLAVA_OV15=(
+#     # "fastv     fastv  attn_implementation=flash_attention_2"
+#     # Applies to both mtcbench_image and mtcbench_video in TASKS above.
+#     # "pdrop     pdrop     layer_list=[9,18,27],image_token_ratio_list=[0.3893,0.1516,0.0590]"
+#     # "visionzip visionzip  attn_implementation=flash_attention_2"
+#     # "prumerge+ prumerge+  attn_implementation=flash_attention_2"
+#     # "dart      dart  attn_implementation=flash_attention_2"
+#     # "h2o        head      head_adaptive=True"
+#     # "snapkv     head      head_adaptive=True,pooling=avgpool"
+#     # "pyramidkv  head      head_adaptive=True,pooling=avgpool"
+#     # "look-m     merge     merge=True"
+#     # "streamingllm streamingllm"
+# )
+# run_eval "llava_onevision1_5_with_kvcache" \
+#          "llava-onevision-1.5" \
+#          "/root/data2/shared/models/LLaVA-OneVision-1.5-8B-Instruct" \
+#          METHODS_LLAVA_OV15
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 6. InternVL3-8B

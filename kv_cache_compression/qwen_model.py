@@ -2594,7 +2594,7 @@ def qwen_flash_attention_forward_CSP(self,
 # DART — Duplication-Aware Reduction of Tokens (Qwen2 backbone, for LLaVA-OV)
 # ===========================================================================
 
-from .qwen2vl_model import get_retained_image_token_dart
+from .qwen2vl_model import get_retained_visual_positions_dart
 
 
 # ---------------------------------------------------------------------------
@@ -2712,35 +2712,33 @@ def qwen_model_forward_dart(
             last_k_states = self.layers[self.target_layer_idx - 1].self_attn.last_k_states
             assert last_k_states is not None, "last_k_states is None at DART target layer"
 
-            text_image_mask = torch.tensor(self.text_image_mask[0])
-            image_positions = (text_image_mask == False).nonzero(as_tuple=True)[0]
-            assert len(image_positions) > 0, "No image tokens found; DART requires an image"
-            image_start = int(image_positions[0])
-            image_end = int(image_positions[-1])
-            image_length = image_end - image_start + 1
-
             device = hidden_states.device
+            text_image_mask = self.text_image_mask[0].to(device=device)
+            visual_positions = (~text_image_mask).nonzero(as_tuple=True)[0]
+            assert visual_positions.numel() > 0, "No visual tokens found; DART requires visual tokens"
+            text_positions = text_image_mask.nonzero(as_tuple=True)[0]
             last_layer_state = self.norm(hidden_states)
 
-            retained = get_retained_image_token_dart(
-                last_layer_state, last_k_states,
-                image_start, image_length,
-                self.budgets, self.pivot_image_token, self.pivot_text_token,
+            retained_visual = get_retained_visual_positions_dart(
+                last_layer_state=last_layer_state,
+                k_states=last_k_states,
+                visual_positions=visual_positions,
+                budgets=self.budgets,
+                pivot_image_token=self.pivot_image_token,
+                pivot_text_token=self.pivot_text_token,
             )
 
-            keep_indexs = torch.cat((
-                torch.arange(image_start, device=device),
-                retained.to(device),
-                torch.arange(image_start + image_length, seq_length, device=device),
-            )).sort().values
+            keep_indices = torch.cat((text_positions, retained_visual.to(device=device))).sort().values
 
-            hidden_states = hidden_states[:, keep_indexs, :]
-            for k in list(causal_mask_mapping.keys()):
-                if causal_mask_mapping[k] is not None:
-                    N = hidden_states.shape[1]
-                    causal_mask_mapping[k] = causal_mask_mapping[k][:, :, :N, :N]
+            hidden_states = hidden_states[:, keep_indices, :]
+            seq_length = hidden_states.shape[1]
+            for key, value in list(causal_mask_mapping.items()):
+                if value is not None:
+                    causal_mask_mapping[key] = value[:, :, keep_indices, :][:, :, :, keep_indices]
+
             # Qwen2 uses 2D position_ids (not 3D like Qwen2-VL)
-            position_ids = keep_indexs.unsqueeze(0)
+            position_ids = position_ids[:, keep_indices]
+            cache_position = cache_position[keep_indices]
             position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
         hidden_states = decoder_layer(

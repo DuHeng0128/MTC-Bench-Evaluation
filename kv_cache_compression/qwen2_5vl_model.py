@@ -77,6 +77,22 @@ def _set_language_model_visual_token_mask(language_model, visual_token_mask: tor
         layer.self_attn.text_image_mask = visual_token_mask
 
 
+def _build_visual_token_mask(
+    input_ids: torch.LongTensor,
+    config,
+) -> torch.BoolTensor:
+    visual_token_mask = torch.ones_like(input_ids, dtype=torch.bool)
+    image_token_id = getattr(config, "image_token_id", None)
+    video_token_id = getattr(config, "video_token_id", None)
+
+    if image_token_id is not None:
+        visual_token_mask &= input_ids != image_token_id
+    if video_token_id is not None:
+        visual_token_mask &= input_ids != video_token_id
+
+    return visual_token_mask
+
+
 # ---------------------------------------------------------------------------
 # FastV — Vision Attention (Qwen2.5-VL text attention)
 # ---------------------------------------------------------------------------
@@ -1626,7 +1642,7 @@ def qwen2_5vl_generation_forward_prumerge_plus(
 # DART — Duplication-Aware Reduction of Tokens (Qwen2.5-VL)
 # ===========================================================================
 
-from .qwen2vl_model import get_retained_image_token_dart
+from .qwen2vl_model import get_retained_visual_positions_dart
 
 
 # ---------------------------------------------------------------------------
@@ -1786,39 +1802,28 @@ def qwen2_5vl_text_model_forward_dart(
             last_k_states = self.layers[self.target_layer_idx - 1].self_attn.last_k_states
             assert last_k_states is not None, "last_k_states is None at DART target layer"
 
-            text_image_mask = self.text_image_mask[0]
-            image_positions = (text_image_mask == False).nonzero(as_tuple=True)[0]
-            assert len(image_positions) > 0, "No image tokens found; DART requires an image"
-            image_start = int(image_positions[0])
-            image_end = int(image_positions[-1])
-            image_length = image_end - image_start + 1
-
             device = hidden_states.device
+            text_image_mask = self.text_image_mask[0].to(device=device)
+            visual_positions = (~text_image_mask).nonzero(as_tuple=True)[0]
+            assert visual_positions.numel() > 0, "No visual tokens found; DART requires visual tokens"
+            text_positions = text_image_mask.nonzero(as_tuple=True)[0]
             last_layer_state = self.norm(hidden_states)
 
-            retained = get_retained_image_token_dart(
-                last_layer_state, last_k_states,
-                image_start, image_length,
-                self.budgets, self.pivot_image_token, self.pivot_text_token,
+            retained_visual = get_retained_visual_positions_dart(
+                last_layer_state=last_layer_state,
+                k_states=last_k_states,
+                visual_positions=visual_positions,
+                budgets=self.budgets,
+                pivot_image_token=self.pivot_image_token,
+                pivot_text_token=self.pivot_text_token,
             )
 
-            keep_indices = torch.cat((
-                torch.arange(image_start, device=device),
-                retained.to(device),
-                torch.arange(image_start + image_length, seq_length, device=device),
-            )).sort().values
+            keep_indices = torch.cat((text_positions, retained_visual.to(device=device))).sort().values
 
             hidden_states = hidden_states[:, keep_indices, :]
             seq_length = hidden_states.shape[1]
 
-            # Adjust causal masks
-            new_mask_mapping = {}
-            for k, v in causal_mask_mapping.items():
-                if v is not None:
-                    new_mask_mapping[k] = v[:, :, keep_indices, :][:, :, :, keep_indices]
-                else:
-                    new_mask_mapping[k] = None
-            causal_mask_mapping = new_mask_mapping
+            causal_mask_mapping = _gather_causal_mask_mapping(causal_mask_mapping, keep_indices)
 
             # Adjust position_ids and recompute rotary embeddings
             position_ids = position_ids[:, :, keep_indices]
@@ -1893,12 +1898,14 @@ def qwen2_5vl_generation_forward_dart(
     )
     return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-    # Set text_image_mask for DART pruning (prefill stage only)
-    if input_ids is not None and pixel_values is not None and inputs_embeds is None:
-        text_image_mask = (input_ids != self.config.image_token_id)
-        self.model.language_model.text_image_mask = text_image_mask
-        for layer in self.model.language_model.layers:
-            layer.self_attn.text_image_mask = text_image_mask
+    # Set visual token mask for DART pruning (prefill stage only)
+    if (
+        input_ids is not None
+        and inputs_embeds is None
+        and (pixel_values is not None or pixel_values_videos is not None)
+    ):
+        visual_token_mask = _build_visual_token_mask(input_ids, self.config)
+        _set_language_model_visual_token_mask(self.model.language_model, visual_token_mask)
 
     outputs = self.model(
         input_ids=input_ids,
