@@ -1,6 +1,6 @@
 import base64
 from io import BytesIO
-from typing import Optional, Tuple, Union
+from typing import Iterator, Optional, Tuple, Union
 
 import av
 import numpy as np
@@ -14,14 +14,51 @@ def load_video_decord(video_path, max_frames_num):
     else:
         vr = VideoReader(video_path[0], ctx=cpu(0))
     total_frame_num = len(vr)
-    uniform_sampled_frames = np.linspace(0, total_frame_num - 1, max_frames_num, dtype=int)
+    uniform_sampled_frames = np.linspace(
+        0, total_frame_num - 1, max_frames_num, dtype=int
+    )
     frame_idx = uniform_sampled_frames.tolist()
     spare_frames = vr.get_batch(frame_idx).asnumpy()
     del vr  # Release VideoReader to prevent memory leak
     return spare_frames  # (frames, height, width, channels)
 
 
+def _compute_sample_indices(
+    total_frames: int,
+    *,
+    num_frm: int = 8,
+    fps: Optional[float] = None,
+    frame_rate=None,
+    force_include_last_frame: bool = False,
+) -> np.ndarray:
+    """Compute uniformly sampled decoded-frame indices."""
+    if total_frames <= 0:
+        return np.array([], dtype=int)
+
+    if fps is not None and frame_rate:
+        video_length = total_frames / float(frame_rate)
+        num_frm = min(num_frm, int(video_length * fps))
+
+    sampled_frm = max(1, min(total_frames, num_frm))
+    if sampled_frm == 1:
+        return np.array([0], dtype=int)
+
+    indices = np.linspace(
+        0,
+        total_frames - 1,
+        sampled_frm,
+        dtype=int,
+        endpoint=force_include_last_frame,
+    )
+
+    if force_include_last_frame and sampled_frm > 1:
+        indices[-1] = total_frames - 1
+
+    return np.unique(indices)
+
+
 # This one is faster
+
 def record_video_length_stream(container, indices):
     if len(indices) == 0:
         return []
@@ -40,14 +77,36 @@ def record_video_length_stream(container, indices):
 
 
 # This one works for all types of video
-def record_video_length_packet(container):
-    frames = []
-    # https://github.com/PyAV-Org/PyAV/issues/1269
-    # https://www.cnblogs.com/beyond-tester/p/17641872.html
-    # context = CodecContext.create("libvpx-vp9", "r")
+
+def _decode_video_packets(container) -> Iterator[av.VideoFrame]:
     for packet in container.demux(video=0):
         for frame in packet.decode():
+            yield frame
+
+
+def record_video_length_packet(container) -> int:
+    total_frames = 0
+    for _ in _decode_video_packets(container):
+        total_frames += 1
+    return total_frames
+
+
+def _load_video_frames_packet(container, indices: np.ndarray):
+    if len(indices) == 0:
+        return []
+
+    frames = []
+    target_indices = {int(index) for index in indices}
+    max_index = int(indices[-1])
+
+    for frame_index, frame in enumerate(_decode_video_packets(container)):
+        if frame_index > max_index:
+            break
+        if frame_index in target_indices:
             frames.append(frame)
+            if len(frames) == len(target_indices):
+                break
+
     return frames
 
 
@@ -61,44 +120,45 @@ def load_video_stream(
     if total_frames <= 0:
         return []
 
-    if fps is not None:
-        video_length = total_frames / frame_rate
-        num_frm = min(num_frm, int(video_length * fps))
-
-    sampled_frm = max(1, min(total_frames, num_frm))
-
-    if sampled_frm == 1:
-        indices = np.array([0], dtype=int)
-    else:
-        indices = np.linspace(
-            0,
-            total_frames - 1,
-            sampled_frm,
-            dtype=int,
-            endpoint=force_include_last_frame,
-        )
-
-    if force_include_last_frame and sampled_frm > 1:
-        indices[-1] = total_frames - 1
-
-    return record_video_length_stream(container, np.unique(indices))
+    indices = _compute_sample_indices(
+        total_frames,
+        num_frm=num_frm,
+        fps=fps,
+        frame_rate=frame_rate,
+        force_include_last_frame=force_include_last_frame,
+    )
+    return record_video_length_stream(container, indices)
 
 
-def load_video_packet(container, num_frm: int = 8, fps: float = None):
-    frames = record_video_length_packet(container)
-    total_frames = len(frames)
-    frame_rate = container.streams.video[0].average_rate
-    if fps is not None:
-        video_length = total_frames / frame_rate
-        num_frm = min(num_frm, int(video_length * fps))
-    sampled_frm = min(total_frames, num_frm)
-    indices = np.linspace(0, total_frames - 1, sampled_frm, dtype=int)
+def load_video_packet(
+    video_path: str,
+    num_frm: int = 8,
+    fps: float = None,
+    force_include_last_frame: bool = False,
+):
+    count_container = av.open(video_path)
+    try:
+        frame_rate = count_container.streams.video[0].average_rate
+        total_frames = record_video_length_packet(count_container)
+    finally:
+        count_container.close()
 
-    # Append the last frame index if not already included
-    if total_frames - 1 not in indices:
-        indices = np.append(indices, total_frames - 1)
+    if total_frames <= 0:
+        return []
 
-    return [frames[i] for i in indices]
+    indices = _compute_sample_indices(
+        total_frames,
+        num_frm=num_frm,
+        fps=fps,
+        frame_rate=frame_rate,
+        force_include_last_frame=force_include_last_frame,
+    )
+
+    sample_container = av.open(video_path)
+    try:
+        return _load_video_frames_packet(sample_container, indices)
+    finally:
+        sample_container.close()
 
 
 def read_video_pyav(
@@ -123,6 +183,7 @@ def read_video_pyav(
         np.ndarray: A numpy array containing the extracted frames in RGB format.
     """
 
+    frames = []
     container = av.open(video_path)
 
     try:
@@ -135,16 +196,21 @@ def read_video_pyav(
             )
         except Exception:
             frames = []
-
-        if fallback_to_packet and not frames:
-            frames = load_video_packet(container, num_frm=num_frm, fps=fps)
-
-        if not frames:
-            return np.empty((0, 0, 0, 3), dtype=np.uint8)
-
-        return np.stack([x.to_ndarray(format=format) for x in frames])
     finally:
         container.close()  # Ensure container is closed to prevent resource leak
+
+    if fallback_to_packet and not frames:
+        frames = load_video_packet(
+            video_path,
+            num_frm=num_frm,
+            fps=fps,
+            force_include_last_frame=force_include_last_frame,
+        )
+
+    if not frames:
+        return np.empty((0, 0, 0, 3), dtype=np.uint8)
+
+    return np.stack([x.to_ndarray(format=format) for x in frames])
 
 
 def read_video_pyav_pil(
@@ -197,7 +263,9 @@ def read_video_pyav_base64(
         return []
 
     base64_frames = []
-    image_mime_type = Image.MIME.get(img_format.upper(), f"image/{img_format.lower()}")
+    image_mime_type = Image.MIME.get(
+        img_format.upper(), f"image/{img_format.lower()}"
+    )
     for frame in frames:
         img = Image.fromarray(frame)
         if max_image_size:

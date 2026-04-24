@@ -1,5 +1,4 @@
 import collections
-import fcntl
 import gc
 import itertools
 import json
@@ -576,10 +575,21 @@ def evaluate(
     ### Load response cache if reuse_responses is enabled ###
     response_cache: dict = {}  # key: (task_name, doc_id, idx) -> resp
     response_cache_path: Optional[Path] = None
+    response_cache_merged_path: Optional[Path] = None
     if reuse_responses and evaluation_tracker is not None and getattr(evaluation_tracker, "output_path", None):
-        response_cache_path = Path(evaluation_tracker.output_path) / "response_cache.jsonl"
-        if response_cache_path.exists():
-            with open(response_cache_path, "r", encoding="utf-8") as _f:
+        cache_dir = Path(evaluation_tracker.output_path)
+        response_cache_merged_path = cache_dir / "response_cache.jsonl"
+        response_cache_path = cache_dir / f"response_cache_rank{global_rank}.jsonl"
+
+        cache_load_paths = [response_cache_merged_path]
+        if response_cache_path != response_cache_merged_path:
+            cache_load_paths.append(response_cache_path)
+
+        loaded_count_before = len(response_cache)
+        for cache_path in cache_load_paths:
+            if not cache_path.exists():
+                continue
+            with open(cache_path, "r", encoding="utf-8") as _f:
                 for _line in _f:
                     _line = _line.strip()
                     if not _line:
@@ -590,7 +600,13 @@ def evaluate(
                         response_cache[_key] = _entry["resp"]
                     except (json.JSONDecodeError, KeyError):
                         pass
-            eval_logger.info(f"[ResponseCache] Loaded {len(response_cache)} cached responses from {response_cache_path}")
+
+        loaded_count = len(response_cache) - loaded_count_before
+        eval_logger.info(
+            "[ResponseCache] Loaded "
+            f"{loaded_count} cached responses from "
+            f"{', '.join(str(p) for p in cache_load_paths if p.exists()) or 'no existing cache files'}"
+        )
 
     ### Run LMM on inputs, get all outputs ###
     # execute each type of request
@@ -647,20 +663,16 @@ def evaluate(
                     ]
 
                     with open(response_cache_path, "a", encoding="utf-8") as _f:
-                        fcntl.flock(_f, fcntl.LOCK_EX)
-                        try:
-                            for key, resp in chunk_pairs:
-                                _entry = {
-                                    "task": key[0],
-                                    "doc_id": key[1],
-                                    "idx": key[2],
-                                    "resp": resp,
-                                }
-                                _f.write(
-                                    json.dumps(_entry, ensure_ascii=False) + "\n"
-                                )
-                        finally:
-                            fcntl.flock(_f, fcntl.LOCK_UN)
+                        for key, resp in chunk_pairs:
+                            _entry = {
+                                "task": key[0],
+                                "doc_id": key[1],
+                                "idx": key[2],
+                                "resp": resp,
+                            }
+                            _f.write(
+                                json.dumps(_entry, ensure_ascii=False) + "\n"
+                            )
 
                     for key, resp in chunk_pairs:
                         new_resp_by_key[key] = resp
@@ -703,6 +715,55 @@ def evaluate(
     WORLD_SIZE = world_size
     if eval_server_launcher is not None and RANK == 0:
         eval_server_launcher.launch()
+
+    if world_size > 1:
+        if distributed_executor_backend == "accelerate":
+            lm.accelerator.wait_for_everyone()
+        elif distributed_executor_backend == "torchrun":
+            dist.barrier()
+
+    if (
+        reuse_responses
+        and response_cache_path is not None
+        and response_cache_merged_path is not None
+        and global_rank == 0
+    ):
+        merged_cache: dict = {}
+        cache_paths = [response_cache_merged_path]
+        cache_paths.extend(
+            response_cache_path.parent / f"response_cache_rank{rank}.jsonl"
+            for rank in range(world_size)
+        )
+
+        for cache_path in cache_paths:
+            if not cache_path.exists():
+                continue
+            with open(cache_path, "r", encoding="utf-8") as _f:
+                for _line in _f:
+                    _line = _line.strip()
+                    if not _line:
+                        continue
+                    try:
+                        _entry = json.loads(_line)
+                        _key = (_entry["task"], _entry["doc_id"], _entry["idx"])
+                        merged_cache[_key] = _entry["resp"]
+                    except (json.JSONDecodeError, KeyError):
+                        pass
+
+        response_cache_merged_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(response_cache_merged_path, "w", encoding="utf-8") as _f:
+            for key, resp in merged_cache.items():
+                _entry = {
+                    "task": key[0],
+                    "doc_id": key[1],
+                    "idx": key[2],
+                    "resp": resp,
+                }
+                _f.write(json.dumps(_entry, ensure_ascii=False) + "\n")
+
+        eval_logger.info(
+            f"[ResponseCache] Merged {len(merged_cache)} responses into {response_cache_merged_path}"
+        )
 
     if world_size > 1:
         if distributed_executor_backend == "accelerate":
