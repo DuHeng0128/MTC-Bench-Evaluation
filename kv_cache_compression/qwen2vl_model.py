@@ -2589,6 +2589,8 @@ def qwen_vl_model_forward_dart(
             hidden_states = hidden_states[:, keep_indexs, :]
             if causal_mask is not None:
                 causal_mask = causal_mask[:, :, keep_indexs, :][:, :, :, keep_indexs]
+            if cache_position is not None:
+                cache_position = cache_position[keep_indexs]
             position_ids = position_ids[:, :, keep_indexs]
             position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
